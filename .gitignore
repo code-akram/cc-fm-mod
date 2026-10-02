@@ -3,3 +3,5 @@
 # Written by Claude Code each time it loads the mod
 mod/.claude-plugin/types/
 .claude/settings.local.json
+# Local reference screenshots (contain private paths)
+/ref/
