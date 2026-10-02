@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -23,6 +24,8 @@ const (
 	ProtocolVersion = 1
 	// FPS is how many bar frames a second the stream carries while playing.
 	FPS = 30
+	// pollerTimeout is how long a /v1/frames client counts as listening.
+	pollerTimeout = 5 * time.Second
 )
 
 // Info is the status as listeners see it: the player's, plus the server's own.
@@ -43,6 +46,15 @@ type Server struct {
 
 	mu      sync.Mutex
 	clients map[chan []byte]struct{}
+	// pollers are /v1/frames clients by id, with when each last asked.
+	pollers map[string]time.Time
+
+	// The latest bar frame for /v1/frames, its sequence number, and a channel
+	// closed (and replaced) each time a new one lands, to wake waiting polls.
+	frameMu sync.Mutex
+	latest  string
+	seq     uint64
+	fresh   chan struct{}
 }
 
 // New builds the player and the server around it; cfg's callbacks are set here.
@@ -51,6 +63,8 @@ func New(cfg player.Config, bands int, version string) *Server {
 		an:      spectrum.New(bands),
 		version: version,
 		clients: map[chan []byte]struct{}{},
+		pollers: map[string]time.Time{},
+		fresh:   make(chan struct{}),
 	}
 	cfg.OnSamples = func(samples []int16) {
 		s.anMu.Lock()
@@ -92,11 +106,64 @@ func (s *Server) Run(ctx context.Context) {
 		s.anMu.Lock()
 		frame = s.an.Frame(frame)
 		s.anMu.Unlock()
-		line := make([]byte, 0, 3+2*len(frame))
-		line = append(line, "B "...)
-		line = hex.AppendEncode(line, frame)
-		s.broadcast(append(line, '\n'))
+		encoded := hex.EncodeToString(frame)
+		s.publish(encoded)
+		s.broadcast([]byte("B " + encoded + "\n"))
 	}
+}
+
+// publish makes a frame the latest for /v1/frames and wakes waiting polls.
+func (s *Server) publish(frame string) {
+	s.frameMu.Lock()
+	defer s.frameMu.Unlock()
+	s.latest = frame
+	s.seq++
+	close(s.fresh)
+	s.fresh = make(chan struct{})
+}
+
+// frames answers GET /v1/frames?after=N&wait=MS&client=ID: the latest frame
+// once one newer than N exists, or none after wait ms. For clients that make
+// one request at a time (a Claude Code mod's $.http), where /v1/stream's
+// endless response can't be read.
+func (s *Server) frames(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	after, _ := strconv.ParseUint(q.Get("after"), 10, 64)
+	wait := time.Second
+	if ms, err := strconv.Atoi(q.Get("wait")); err == nil {
+		wait = time.Duration(min(max(ms, 0), 5000)) * time.Millisecond
+	}
+	if id := q.Get("client"); id != "" && len(id) <= 64 {
+		s.mu.Lock()
+		s.pollers[id] = time.Now()
+		s.mu.Unlock()
+	}
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	for {
+		s.frameMu.Lock()
+		seq, latest, fresh := s.seq, s.latest, s.fresh
+		s.frameMu.Unlock()
+		if seq > after && s.Player.Status().State == player.Playing {
+			writeJSON(w, framesReply{Seq: seq, Frame: latest, Status: s.info()})
+			return
+		}
+		select {
+		case <-fresh:
+		case <-timer.C:
+			writeJSON(w, framesReply{Seq: seq, Status: s.info()})
+			return
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+type framesReply struct {
+	Seq    uint64 `json:"seq"`
+	Frame  string `json:"frame"`
+	Status Info   `json:"status"`
 }
 
 func (s *Server) Handler() http.Handler {
@@ -140,6 +207,7 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, s.info())
 	})
 	mux.HandleFunc("GET /v1/stream", s.stream)
+	mux.HandleFunc("GET /v1/frames", s.frames)
 	return mux
 }
 
@@ -199,6 +267,13 @@ func (s *Server) broadcast(line []byte) {
 func (s *Server) info() Info {
 	s.mu.Lock()
 	listeners := len(s.clients)
+	for id, seen := range s.pollers {
+		if time.Since(seen) > pollerTimeout {
+			delete(s.pollers, id)
+			continue
+		}
+		listeners++
+	}
 	s.mu.Unlock()
 	return Info{
 		Status:    s.Player.Status(),

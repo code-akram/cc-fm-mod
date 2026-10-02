@@ -28,7 +28,7 @@ Audio never crosses the network. Only the bar heights do, at under 1 KB/s. Every
 
 - Claude Code 2.1.287 or later, the first release with mods
 - On the machine with speakers: macOS or Linux, plus `ffmpeg` and `yt-dlp` (Homebrew installs them for you)
-- On the machine running Claude Code: `curl`, which macOS and Linux already have
+- On the machine running Claude Code: nothing else; the mod talks to the player through Claude Code itself
 
 ## Setup
 
@@ -148,12 +148,7 @@ Useful `serve` flags:
 
 ## What the mod runs
 
-Mods have no permission model yet, so here is everything this one runs on the machine Claude Code is on:
-
-- `curl --unix-socket <socket> …`, to read the bars and send `/fm` commands
-- `sh -c` once, to resolve the socket path from `$CC_FM_SOCKET` and `$HOME`
-
-It reads and writes no files.
+The mod runs no programs and reads or writes no files. It talks only to the player's local unix socket, through Claude Code's own `$.http` call: frames and status from `GET /v1/frames`, and your `/fm` commands as requests to `/v1/play`, `/v1/stop` and `/v1/volume`. It reads `$CC_FM_SOCKET` and `$HOME` to find the socket. The mod's [README](mod/README.md) has the details.
 
 ## Development
 

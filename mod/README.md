@@ -23,12 +23,14 @@ The mod doesn't play audio itself. The cc-fm player does, on the machine with yo
 
 ## What it runs and sends
 
-Everything the mod does stays on your machine. It talks only to the cc-fm player's local unix socket, `~/.cc-fm/fm.sock`, or the path in `$CC_FM_SOCKET`. Specifically it runs:
+The mod runs no programs, and nothing it does leaves your machine. All it does is make HTTP requests to the cc-fm player over the player's local unix socket, `~/.cc-fm/fm.sock` (or the path in `$CC_FM_SOCKET`), through Claude Code's own `$.http` call with its `socketPath` option:
 
-- `curl --unix-socket <socket> http://cc-fm/...`, to read the bars and the player's status and to send play, stop and volume requests
-- `sh -c` once per load, to work out the socket path from `$CC_FM_SOCKET` and `$HOME`
+- `GET /v1/frames`, about 15 times a second while the player plays (once a second while it doesn't): the latest bar frame and the player's status
+- `GET /v1/status`, and `POST /v1/play`, `/v1/stop` and `/v1/volume`, when you run `/fm` or press a control
 
-It reads and writes no files, makes no network requests, and collects no data. The player, a separate program you install yourself, is what fetches the radio stream.
+It reads two environment variables, `CC_FM_SOCKET` and `HOME`, to find the socket. It reads and writes no files and collects no data. The player, a separate program you install yourself, is what fetches the radio stream.
+
+It also hooks two Claude Code events, `ui.focus` and `ui.press`, only to notice when `ctrl+x tab` moves into its own controls or a key is pressed there, so it can light the rail. It passes both events on unchanged and ignores any that aren't for its own controls.
 
 ## License
 

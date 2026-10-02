@@ -22,6 +22,16 @@ Each command answers with the status object. `POST /v1/play` refuses (`403`) any
 
 `state` is one of `stopped`, `connecting`, `playing` or `retrying`. While retrying, `error` says why. `output` is the audio device; `null` means the player's machine has no speakers and serves bars only.
 
+## Frames: `GET /v1/frames?after=N&wait=MS&client=ID`
+
+For clients that make one request at a time, such as the Claude Code mod through `$.http`, which can't read an endless response. It answers with the latest frame as soon as there's one newer than sequence number `N`, or with no frame after `wait` milliseconds (default 1000, at most 5000) while nothing plays:
+
+```json
+{"seq": 4812, "frame": "33664e07…", "status": { …the status object… }}
+```
+
+`frame` holds the same hex bands as a stream's `B` line, or is empty. Pass the `seq` you got as the next `after`. A `client` id makes the poller count among `listeners` for five seconds after each request.
+
 ## Stream: `GET /v1/stream`
 
 Newline-delimited text, one message per line:

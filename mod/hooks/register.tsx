@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { FmStatus } from '../types'
-import { encodeCells, parseLine, resample, splitLines } from './bars'
+import { encodeCells, parseLine, resample } from './bars'
 import { RED, VIOLET, keyHint, listening, meter, railed, stateItem } from './views'
 
 const status = atom({ plugin: 'cc-fm-mod', key: 'status' } as const, { state: 'offline' } as FmStatus)
@@ -17,13 +17,15 @@ const COLUMNS = 24
 // Below this width the hint row keeps all its room for the engine's own line.
 const MIN_VIEWPORT = 60
 const RETRY_MS = 3000
-// Repaints cost the terminal real CPU at 30 fps, so a session paints every
-// 2nd frame (15 fps) while busy and every 4th (~8 fps) while idle, and skips
+// Repaints cost the terminal real CPU, so a session paints every frame it
+// gets (15 fps) while busy and every 2nd (~8 fps) while idle, and skips
 // frames that look the same as the last one at the bars' resolution.
-const BUSY_EVERY = 2
-const IDLE_EVERY = 4
+const BUSY_EVERY = 1
+const IDLE_EVERY = 2
+// Frames asked of the player each second, at most.
+const FPS = 15
 // Frames between checks that the session's state still holds the status.
-const RESYNC_EVERY = 60
+const RESYNC_EVERY = 30
 
 // Volume change per press of j or k in the controls.
 const VOLUME_STEP = 5
@@ -69,12 +71,10 @@ let lastCells = ''
 // The player's socket: $CC_FM_SOCKET, or ~/.cc-fm/fm.sock.
 async function socketPath($: EngineInterface): Promise<string> {
   if (socket) return socket
-  const { stdout } = await $.process.run([
-    'sh',
-    '-c',
-    'p=${CC_FM_SOCKET:-$HOME/.cc-fm/fm.sock}; case $p in "~/"*) p=$HOME/${p#"~/"};; esac; printf %s "$p"',
-  ])
-  socket = stdout
+  const home = (await $.env.get('HOME')) ?? ''
+  const configured = (await $.env.get('CC_FM_SOCKET')) ?? ''
+  const path = configured || `${home}/.cc-fm/fm.sock`
+  socket = path.startsWith('~/') ? `${home}/${path.slice(2)}` : path
   return socket
 }
 
@@ -124,42 +124,61 @@ function paint($: EngineInterface, frame: Uint8Array) {
   void $.ui.blit({ requestId: site, key: 'bars', cells })
 }
 
-// Holds the stream open for the session's life, reconnecting while no
-// player answers. A hot reload ends the loop with the old module.
+// Follows the player for the session's life, a frame per request over its
+// unix socket: the latest frame as soon as there's a newer one, or none
+// after a second while nothing plays. A hot reload ends the loop with the
+// old module.
 async function listen($: EngineInterface) {
   const path = await socketPath($)
+  const client = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+  let seq = 0
+  let isOld = false
   for (;;) {
-    let buffer = ''
+    const started = Date.now()
     try {
-      const stream = $.process.spawn({ argv: ['curl', '-sN', '--unix-socket', path, 'http://cc-fm/v1/stream'] })
-      for await (const piece of stream) {
-        if (piece.stream !== 'stdout') continue
-        const split = splitLines(buffer, piece.text)
-        buffer = split.rest
-        for (const line of split.lines) {
-          const msg = parseLine(line)
-          if (msg?.kind === 'status') await setStatus($, msg.status)
-          else if (msg?.kind === 'bars') paint($, msg.bars)
-        }
+      const res = await $.http.fetch(`http://cc-fm/v1/frames?after=${seq}&wait=1000&client=${client}`, { socketPath: path })
+      if (res.status === 404) {
+        // A player from before /v1/frames: say so once, then keep checking.
+        if (!isOld) $.ui.toast('cc-fm: this player is too old for the mod; update it (brew upgrade cc-fm)')
+        isOld = true
+        throw new Offline()
+      }
+      const reply = JSON.parse(res.text) as { seq: number; frame: string; status: FmStatus }
+      isOld = false
+      seq = reply.seq
+      await setStatus($, reply.status)
+      if (reply.frame) {
+        const frame = parseLine(`B ${reply.frame}`)
+        if (frame?.kind === 'bars') paint($, frame.bars)
       }
     } catch {
-      // curl missing or refused to start: same as no player, try again later.
+      seq = 0
+      await setStatus($, { state: 'offline' })
+      await $.clock.sleep(RETRY_MS)
+      continue
     }
-    await setStatus($, { state: 'offline' })
-    await $.clock.sleep(RETRY_MS)
+    // At most FPS requests a second: locally answers come at once.
+    const left = 1000 / FPS - (Date.now() - started)
+    if (left > 0) await $.clock.sleep(left)
   }
 }
 
 async function api($: EngineInterface, method: 'GET' | 'POST', path: string, body?: object): Promise<FmStatus> {
-  const argv = ['curl', '-sS', '--max-time', '5', '--unix-socket', await socketPath($), '-X', method]
-  if (body) argv.push('-H', 'Content-Type: application/json', '--data', JSON.stringify(body))
-  argv.push(`http://cc-fm${path}`)
-  const { exitCode, stdout } = await $.process.run(argv, { timeoutMs: 8000 })
-  if (exitCode !== 0) throw new Offline()
+  let res
   try {
-    return JSON.parse(stdout) as FmStatus
+    res = await $.http.fetch(`http://cc-fm${path}`, {
+      method,
+      socketPath: await socketPath($),
+      ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
+    })
   } catch {
-    throw new Error(stdout.trim() || 'the player gave no answer')
+    throw new Offline()
+  }
+  if (!res.ok) throw new Error(res.text.trim() || `the player answered ${res.status}`)
+  try {
+    return JSON.parse(res.text) as FmStatus
+  } catch {
+    throw new Error(res.text.trim() || 'the player gave no answer')
   }
 }
 
