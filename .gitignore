@@ -1,0 +1,5 @@
+/bin/
+/dist/
+# Written by Claude Code each time it loads the mod
+mod/.claude-plugin/types/
+.claude/settings.local.json
