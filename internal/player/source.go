@@ -36,7 +36,7 @@ func resolve(ctx context.Context, source string, ytDlpArgs []string) ([]string, 
 	}
 
 	if !needsYtDlp(u.Hostname()) {
-		return append(networkOnly(), "-i", source), source, nil
+		return urlInput(source), source, nil
 	}
 
 	yt, err := YtDlpPath()
@@ -59,7 +59,18 @@ func resolve(ctx context.Context, source string, ytDlpArgs []string) ([]string, 
 		return nil, "", errors.New("yt-dlp printed no stream URL")
 	}
 
-	return append(networkOnly(), "-i", strings.TrimSpace(lines[1])), strings.TrimSpace(lines[0]), nil
+	return urlInput(strings.TrimSpace(lines[1])), strings.TrimSpace(lines[0]), nil
+}
+
+// urlInput is ffmpeg's input for a URL: network protocols only and, for a
+// live HLS playlist, a start far enough behind the newest segment that the
+// player's read-ahead buffer has segments to fill from.
+func urlInput(u string) []string {
+	args := networkOnly()
+	if strings.Contains(u, ".m3u8") || strings.Contains(u, "/hls_playlist/") {
+		args = append(args, "-live_start_index", "-6")
+	}
+	return append(args, "-i", u)
 }
 
 // networkOnly keeps ffmpeg to network protocols for a URL, so a playlist

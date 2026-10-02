@@ -227,7 +227,11 @@ func (p *Player) once(ctx context.Context, source string) error {
 		}
 	})
 
-	p.pump(decoded, speakerIn)
+	if isUnpaced {
+		p.pump(decoded, speakerIn)
+	} else {
+		p.bufferedPump(ctx, decoded, speakerIn)
+	}
 	cancel()
 	decodeExit := decoder.Wait()
 	var speakerExit error
@@ -346,6 +350,107 @@ const underrunSlack = 20 * time.Millisecond
 func (p *Player) logf(format string, args ...any) {
 	if p.cfg.Log != nil {
 		p.cfg.Log(fmt.Sprintf(format, args...))
+	}
+}
+
+// The read-ahead buffer between decoder and speakers. A live stream arrives
+// in segments fetched one at a time, and a slow fetch stalls the decoder;
+// running ahead absorbs that instead of starving the speakers.
+const (
+	// bufferAhead is how far the decoder may run ahead of the speakers.
+	bufferAhead = 15 * time.Second
+	// prefill is queued before playback starts.
+	prefill = 2 * time.Second
+	// rebuffer is queued again after a stall before playback resumes: one
+	// clean pause rather than a stutter of dropouts.
+	rebuffer = time.Second
+	// chunkBytes is about 85 ms of audio.
+	chunkBytes = 16384
+)
+
+func chunksFor(d time.Duration) int {
+	return int(d * playRate * frameBytes / time.Second / chunkBytes)
+}
+
+// bufferedPump lets the decoder run up to bufferAhead in front of the
+// speakers. Volume, the visualizer and the recording act on audio as it
+// goes to the speakers, so they stay in step with what is heard.
+func (p *Player) bufferedPump(ctx context.Context, r io.Reader, w io.Writer) {
+	queue := make(chan []byte, chunksFor(bufferAhead))
+	// inputDone closes once the decoder has nothing more to give.
+	inputDone := make(chan struct{})
+	go func() {
+		defer close(queue)
+		defer close(inputDone)
+		for {
+			chunk := make([]byte, chunkBytes)
+			n, err := io.ReadFull(r, chunk)
+			if n &^= frameBytes - 1; n > 0 {
+				select {
+				case queue <- chunk[:n]:
+				case <-ctx.Done():
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// fill waits until want chunks are queued, or the input has ended with
+	// some left to play; false when there is nothing left or ctx is done.
+	fill := func(want int) bool {
+		tick := time.NewTicker(20 * time.Millisecond)
+		defer tick.Stop()
+		for len(queue) < want {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-inputDone:
+				return len(queue) > 0
+			case <-tick.C:
+			}
+		}
+		return true
+	}
+
+	if !fill(chunksFor(prefill)) {
+		return
+	}
+	p.setState(Playing, "")
+	current := p.gain()
+	for {
+		var chunk []byte
+		select {
+		case c, ok := <-queue:
+			if !ok {
+				return
+			}
+			chunk = c
+		default:
+			// Nothing queued: the stream stalled for longer than the buffer.
+			stalled := time.Now()
+			if !fill(chunksFor(rebuffer)) {
+				return
+			}
+			p.logf("underrun: the stream stalled, so playback paused %v to rebuffer",
+				time.Since(stalled).Round(time.Millisecond))
+			continue
+		}
+
+		target := p.gain()
+		mono := applyGain(chunk, current, target)
+		current = target
+		if p.cfg.Record != nil {
+			_ = binary.Write(p.cfg.Record, binary.LittleEndian, mono)
+		}
+		if p.cfg.OnSamples != nil {
+			p.cfg.OnSamples(mono)
+		}
+		if _, err := w.Write(chunk); err != nil {
+			return
+		}
 	}
 }
 

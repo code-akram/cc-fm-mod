@@ -144,6 +144,7 @@ Useful `serve` flags:
 - **`yt-dlp: Sign in to confirm you're not a bot`.** YouTube blocks many datacenter IPs. Run the player on your own machine, which is the intended setup anyway, or pass browser cookies with `--yt-dlp-args`.
 - **`remote port forwarding failed`.** See the sshd notes under step 3, or remove a stale `~/.cc-fm/fm.sock` on the server.
 - **Bars lag behind the sound over SSH.** Use `--delay-ms`.
+- **Stutters, or crackles at track changes.** The player reads up to 15 seconds ahead of the speakers, so slow downloads from YouTube are absorbed. If the stream stalls for longer than that, playback pauses once to rebuffer rather than stuttering. Each pause is logged as `underrun: …` in the player's log (`/opt/homebrew/var/log/cc-fm.log` under `brew services`).
 
 ## What the mod runs
 
