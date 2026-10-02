@@ -25,9 +25,17 @@ export type Item = { glyph: string; color?: string; content: RenderNode }
 // visualizer's coral; receded for the controls without it, all dimmed.
 export type Mode = 'static' | 'active' | 'receded'
 
-// A railed block: the title, items with a connector between each, and a
-// closing line, after a blank line unless isSpaced is false.
-export function railed(ui: Ui, items: Item[], footer: RenderNode, mode: Mode = 'static', isSpaced = true): RenderElement {
+// A railed block: the title, items with a connector between each (unless
+// hasConnectors is false, for tight spaces), and a closing line, after a
+// blank line unless isSpaced is false.
+export function railed(
+  ui: Ui,
+  items: Item[],
+  footer: RenderNode,
+  mode: Mode = 'static',
+  isSpaced = true,
+  hasConnectors = true,
+): RenderElement {
   const { Box, Text } = ui
   const isDim = mode === 'receded'
   const railColor = mode === 'active' ? CORAL : undefined
@@ -45,7 +53,7 @@ export function railed(ui: Ui, items: Item[], footer: RenderNode, mode: Mode = '
     </Box>,
   ]
   for (const item of items) {
-    rows.push(edge('│'))
+    if (hasConnectors) rows.push(edge('│'))
     rows.push(
       <Box flexDirection="row" gap={2}>
         <Text color={isDim ? undefined : item.color} dimColor={isDim || !item.color}>
@@ -55,7 +63,7 @@ export function railed(ui: Ui, items: Item[], footer: RenderNode, mode: Mode = '
       </Box>,
     )
   }
-  if (items.length > 0) rows.push(edge('│'))
+  if (items.length > 0 && hasConnectors) rows.push(edge('│'))
   rows.push(
     <Box flexDirection="row" gap={2}>
       {edge('└')}

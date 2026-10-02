@@ -8,6 +8,10 @@ import { RED, VIOLET, keyHint, listening, meter, railed, stateItem } from './vie
 const status = atom({ plugin: 'cc-fm-mod', key: 'status' } as const, { state: 'offline' } as FmStatus)
 // Whether the controls above the composer are showing (/fm keys).
 const isKeysOpen = atom({ plugin: 'cc-fm-mod', key: 'isKeysOpen' } as const, false)
+// Whether the person is driving the controls: lit from the moment ctrl+x tab
+// focuses them, dimmed again once they type or go quiet (Claude Code says
+// when the band takes the keyboard, not when it gives it back).
+const isControlling = atom({ plugin: 'cc-fm-mod', key: 'isControlling' } as const, false)
 
 const COLUMNS = 24
 // Below this width the hint row keeps all its room for the engine's own line.
@@ -23,8 +27,12 @@ const RESYNC_EVERY = 60
 
 // Volume change per press of j or k in the controls.
 const VOLUME_STEP = 5
-// Rows the controls need for the full rail; with fewer they take one line.
-const RAIL_ROWS = 9
+// Rows the controls need with connectors between items, and without; with
+// fewer they take one line.
+const RAIL_ROWS = 11
+const TIGHT_RAIL_ROWS = 6
+// How long the controls stay lit with no key pressed in them.
+const CONTROL_IDLE_MS = 8000
 
 // What /fm takes, for its typeahead line and its usage reply.
 const COMMANDS: [string, string][] = [
@@ -76,6 +84,25 @@ async function setStatus($: EngineInterface, next: FmStatus) {
   if (json === lastStatus) return
   lastStatus = json
   await update($, status, () => next)
+}
+
+let lastControl = 0
+
+// Lights the controls and keeps them lit while keys keep coming.
+async function controlling($: EngineInterface) {
+  lastControl = Date.now()
+  await update($, isControlling, () => true)
+  void $.clock.after(CONTROL_IDLE_MS + 100, () => settle($))
+}
+
+// Dims the controls once no key has been pressed in them for a while.
+async function settle($: EngineInterface) {
+  if (Date.now() - lastControl >= CONTROL_IDLE_MS) await update($, isControlling, () => false)
+}
+
+async function release($: EngineInterface) {
+  lastControl = 0
+  await update($, isControlling, () => false)
 }
 
 // A /clear starts a new session whose state starts over, and no event says
@@ -201,6 +228,7 @@ export const register: Register = on => {
     const word = verb.toLowerCase()
     try {
       if (word === 'keys') {
+        await release($)
         await update($, isKeysOpen, isOpen => !isOpen)
         return {}
       }
@@ -287,62 +315,91 @@ export const register: Register = on => {
     }
   })
 
-  // The controls above the composer, opened by /fm keys. Digits drive them,
-  // as Claude Code's own surveys: a bare digit typed into an empty prompt
-  // presses the button, so there's no chord to learn and nothing to focus.
-  // The rail is lit while they're up; typing a message is unaffected.
+  // Focus entering the controls (ctrl+x tab lands on play) or a key pressed
+  // in them lights the rail.
+  on('ui.focus', async ($, e, next) => {
+    if (e.component === 'AbovePrompt' && e.plugin === 'cc-fm-mod' && e.element) await controlling($)
+    return next(e)
+  })
+  on('ui.press', async ($, e, next) => {
+    if (e.component === 'AbovePrompt' && e.plugin === 'cc-fm-mod') await controlling($)
+    return next(e)
+  })
+
+  // The controls above the composer, opened by /fm keys: ctrl+x tab takes
+  // them, then vim-style keys (a play, s stop, h quieter, l louder, x close)
+  // and esc back to the prompt. Lit while driven, receded at rest, the
+  // leader named once, on its own line.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.surface !== 'terminal' || e.props.hasSurvey || !(await read($, isKeysOpen))) return next(e)
     const ui = $.ui.resolve(e)
     const { Box, Button, Text } = ui
     const st = await read($, status)
+    const isLit = await read($, isControlling)
     const volume = st.volume ?? 0
     const isPlaying = st.state === 'playing'
     const isStopped = st.state === 'stopped' || st.state === 'offline'
 
-    const play = <Button key="play" hotkey="1" plain label="play" dimColor={isPlaying} onPress={() => control($, 'POST', '/v1/play')} />
-    const stop = <Button key="stop" hotkey="2" plain label="stop" dimColor={isStopped} onPress={() => control($, 'POST', '/v1/stop')} />
+    const play = (
+      <Button key="play" hotkey="a" plain autoFocus label="play" dimColor={!isLit || isPlaying} onPress={() => control($, 'POST', '/v1/play')} />
+    )
+    const stop = <Button key="stop" hotkey="s" plain label="stop" dimColor={!isLit || isStopped} onPress={() => control($, 'POST', '/v1/stop')} />
     const quieter = (
       <Button
         key="down"
-        hotkey="3"
+        hotkey="h"
         plain
         label="quieter"
-        dimColor={volume === 0}
+        dimColor={!isLit || volume === 0}
         onPress={() => control($, 'POST', '/v1/volume', { volume: Math.max(0, volume - VOLUME_STEP) })}
       />
     )
     const louder = (
       <Button
         key="up"
-        hotkey="4"
+        hotkey="l"
         plain
         label="louder"
-        dimColor={volume === 100}
+        dimColor={!isLit || volume === 100}
         onPress={() => control($, 'POST', '/v1/volume', { volume: Math.min(100, volume + VOLUME_STEP) })}
       />
     )
-    const close = <Button key="close" hotkey="0" plain label="close" onPress={() => update($, isKeysOpen, () => false)} />
+    const close = (
+      <Button
+        key="close"
+        hotkey="x"
+        plain
+        label="close"
+        dimColor={!isLit}
+        onPress={async () => {
+          await release($)
+          await update($, isKeysOpen, () => false)
+        }}
+      />
+    )
+    const leader = isLit ? keyHint(ui, 'esc', 'back to the prompt') : keyHint(ui, 'ctrl+x tab', 'take the controls')
 
-    if (e.props.maxRows < RAIL_ROWS) {
+    if (e.props.maxRows < TIGHT_RAIL_ROWS) {
       return (
         <Box flexDirection="row" gap={2}>
           <Text bold>♪ claude.fm</Text>
-          {stateItem(ui, st).content}
+          {stateItem(ui, st, undefined, !isLit).content}
           {play}
           {stop}
           {quieter}
-          <Text>{volume}</Text>
+          <Text dimColor={!isLit}>{volume}</Text>
           {louder}
           {close}
+          {leader}
         </Box>
       )
     }
 
+    const hasConnectors = e.props.maxRows >= RAIL_ROWS
     return railed(
       ui,
       [
-        stateItem(ui, st),
+        stateItem(ui, st, undefined, !isLit),
         {
           glyph: '◇',
           color: VIOLET_ITEM,
@@ -359,23 +416,24 @@ export const register: Register = on => {
           content: (
             <Box flexDirection="row" gap={2}>
               {quieter}
-              {meter(ui, volume)}
-              <Text>{String(volume).padStart(3)}</Text>
+              {meter(ui, volume, !isLit)}
+              <Text dimColor={!isLit}>{String(volume).padStart(3)}</Text>
               {louder}
             </Box>
           ),
         },
+        { glyph: '◇', color: VIOLET_ITEM, content: close },
       ],
-      <Box flexDirection="row" gap={2}>
-        {close}
-        <Text dimColor>·  from an empty prompt</Text>
-      </Box>,
-      'active',
+      leader,
+      isLit ? 'active' : 'receded',
       e.props.maxRows > RAIL_ROWS,
+      hasConnectors,
     )
   })
 
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    // Typing in the prompt, or a turn, means the controls gave the keys back.
+    if ((e.props.isDraft || e.props.isWorking) && lastControl > 0) void $.clock.after(0, () => release($))
     if (e.surface !== 'terminal') return next(e)
     const st = await read($, status)
     const isShown =
