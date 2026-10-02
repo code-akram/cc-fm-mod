@@ -120,7 +120,7 @@ cc-fm doctor             check ffmpeg, yt-dlp and the audio device
 
 Useful `serve` flags:
 
-- `--volume`: the starting volume.
+- `--volume`: the starting volume. Without it, the player starts at the last volume you set (it remembers it in `~/.cc-fm/state.json`), or 70 the first time.
 - `--output`: the audio device, `auto`, `audiotoolbox`, `pulse`, `alsa` or `null`.
 - `--delay-ms`: holds the speakers back so remote bars line up with what you hear. Try roughly your ping time to the server.
 - `--yt-dlp-args`: extra yt-dlp arguments, for example `"--cookies-from-browser firefox"`.

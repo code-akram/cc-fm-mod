@@ -70,6 +70,8 @@ type Config struct {
 	OnSamples func([]int16)
 	// OnChange receives every status change.
 	OnChange func(Status)
+	// OnVolume receives each volume set, to keep it for the next run.
+	OnVolume func(int)
 	// Log receives ffmpeg's warnings, a line at a time; nil drops them.
 	Log func(string)
 }
@@ -144,6 +146,9 @@ func (p *Player) SetVolume(v int) {
 	p.st.Volume = clampVolume(v)
 	st := p.st
 	p.mu.Unlock()
+	if p.cfg.OnVolume != nil {
+		p.cfg.OnVolume(st.Volume)
+	}
 	p.notify(st)
 }
 

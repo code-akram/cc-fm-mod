@@ -104,12 +104,20 @@ func serve(args []string) error {
 	sock := fs.String("socket", socketPath(), "unix socket to listen on")
 	tcp := fs.String("tcp", "", "also listen on this TCP address (e.g. 127.0.0.1:47130)")
 	output := fs.String("output", "auto", "audio device: auto, audiotoolbox, pulse, alsa, null, or file:<path> to record a WAV")
-	volume := fs.Int("volume", 70, "starting volume, 0-100")
+	volume := fs.Int("volume", 70, "starting volume, 0-100 (default: the last volume set, else 70)")
 	delay := fs.Int("delay-ms", 0, "hold the speakers back so remote bars line up with the sound")
 	bands := fs.Int("bands", 32, "bars per frame")
 	autoplay := fs.String("autoplay", "", `start playing this source at once ("default" for claude.fm)`)
 	ytArgs := fs.String("yt-dlp-args", "", `extra yt-dlp arguments, e.g. "--cookies-from-browser firefox"`)
 	_ = fs.Parse(args)
+
+	// The last volume set wins over the default, but not over --volume.
+	saved := loadState()
+	isVolumeSet := false
+	fs.Visit(func(f *flag.Flag) { isVolumeSet = isVolumeSet || f.Name == "volume" })
+	if !isVolumeSet && saved.Volume != nil {
+		*volume = *saved.Volume
+	}
 
 	if *output == "auto" {
 		*output = player.DetectOutput()
@@ -129,6 +137,11 @@ func serve(args []string) error {
 		DelayMs:   *delay,
 		YtDlpArgs: strings.Fields(*ytArgs),
 		Log:       func(line string) { log.Print("ffmpeg: ", line) },
+		OnVolume: func(v int) {
+			if err := saveState(state{Volume: &v}); err != nil {
+				log.Print("saving the volume: ", err)
+			}
+		},
 	}, *bands, version)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -208,6 +221,60 @@ func removeIfOurs(path string) {
 
 // owned is the socket file this process created.
 var owned os.FileInfo
+
+// state is what the player remembers between runs, in ~/.cc-fm/state.json.
+type state struct {
+	Volume *int `json:"volume,omitempty"`
+}
+
+func statePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".cc-fm", "state.json")
+}
+
+// loadState reads the saved state; missing or unreadable, it starts empty.
+func loadState() state {
+	var s state
+	if b, err := os.ReadFile(statePath()); err == nil {
+		_ = json.Unmarshal(b, &s)
+	}
+	if s.Volume != nil && (*s.Volume < 0 || *s.Volume > 100) {
+		s.Volume = nil
+	}
+	return s
+}
+
+// saveState writes the state through a temporary file, so a crash mid-write
+// never leaves a half-written one behind.
+func saveState(s state) error {
+	path := statePath()
+	if path == "" {
+		return errors.New("no home directory")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "state-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(append(b, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
 
 func socketPath() string {
 	if p := os.Getenv("CC_FM_SOCKET"); p != "" {
