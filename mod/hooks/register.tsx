@@ -22,11 +22,15 @@ const RESYNC_EVERY = 60
 
 // Volume change per press of j or k in the controls.
 const VOLUME_STEP = 5
-// Rows the controls need for their spaced, three-line layout.
+// Rows the controls need for their full, railed layout, and for the spaced
+// three-line one; with less they take one line.
+const RAIL_ROWS = 9
 const SPACIOUS_ROWS = 5
 // Cells in the controls' volume meter.
 const METER_CELLS = 16
 const CORAL = '#d97757'
+const AMBER = '#e0af68'
+const STEEL = '#7aa2f7'
 
 const USAGE = '/fm toggles · /fm stop · /fm vol 40 · /fm status · /fm keys · /fm play <url>'
 
@@ -201,9 +205,9 @@ export const register: Register = on => {
     }
   })
 
-  // The controls above the prompt, shown by /fm keys. Three lines with room
-  // between them where the band has it (state; transport and volume; how to
-  // use them), one line where it doesn't. Hotkeys work once ctrl+x tab
+  // The controls above the prompt, shown by /fm keys: a railed, one-item-a-
+  // line layout where the band has room, three spaced lines where it has
+  // less, one line where it has little. Hotkeys work once ctrl+x tab
   // focuses the band, and every button clicks too.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const st = await read($, status)
@@ -263,6 +267,73 @@ export const register: Register = on => {
     }
 
     const filled = Math.round((volume / 100) * METER_CELLS)
+    const meter = (
+      <Text>
+        <Text color={CORAL}>{'━'.repeat(filled)}</Text>
+        <Text dimColor>{'─'.repeat(METER_CELLS - filled)}</Text>
+      </Text>
+    )
+    const howTo = (
+      <Text>
+        <Text bold>ctrl+x tab</Text>
+        <Text dimColor>  use these keys  ·  </Text>
+        <Text bold>esc</Text>
+        <Text dimColor>  back to the prompt  ·  </Text>
+      </Text>
+    )
+
+    // Room for the full layout: one item a line on a thin left rail, state
+    // carried by the glyph, after the clack-style CLI steppers.
+    if (e.props.maxRows >= RAIL_ROWS) {
+      const rail = <Text dimColor>│</Text>
+      const dot = isPlaying ? (
+        <Text color={CORAL}>●</Text>
+      ) : isStopped ? (
+        <Text dimColor>○</Text>
+      ) : (
+        <Text color={AMBER}>◌</Text>
+      )
+      return (
+        <Box flexDirection="column" paddingX={1}>
+          <Box flexDirection="row" gap={2}>
+            <Text dimColor>┌</Text>
+            <Text bold>♪ claude.fm</Text>
+          </Box>
+          {rail}
+          <Box flexDirection="row" gap={2}>
+            {dot}
+            <Text dimColor={!isPlaying}>{stateLabel}</Text>
+          </Box>
+          {rail}
+          <Box flexDirection="row" gap={2}>
+            <Text color={STEEL}>◇</Text>
+            <Box flexDirection="row" gap={4}>
+              {play}
+              {stop}
+            </Box>
+          </Box>
+          {rail}
+          <Box flexDirection="row" gap={2}>
+            <Text color={STEEL}>◇</Text>
+            <Box flexDirection="row" gap={2}>
+              {quieter}
+              {meter}
+              <Text>{String(volume).padStart(3)}</Text>
+              {louder}
+            </Box>
+          </Box>
+          {rail}
+          <Box flexDirection="row" gap={2}>
+            <Text dimColor>└</Text>
+            <Box flexDirection="row">
+              {howTo}
+              {close}
+            </Box>
+          </Box>
+        </Box>
+      )
+    }
+
     return (
       <Box flexDirection="column" paddingX={1}>
         <Box flexDirection="row" gap={3}>
@@ -276,10 +347,7 @@ export const register: Register = on => {
           </Box>
           <Box flexDirection="row" gap={2}>
             {quieter}
-            <Text>
-              <Text color={CORAL}>{'━'.repeat(filled)}</Text>
-              <Text dimColor>{'─'.repeat(METER_CELLS - filled)}</Text>
-            </Text>
+            {meter}
             <Text>{String(volume).padStart(3)}</Text>
             {louder}
           </Box>
