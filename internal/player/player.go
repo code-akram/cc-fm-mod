@@ -1,5 +1,12 @@
-// Package player runs one ffmpeg that plays a stream to the speakers and,
-// from the same decode, hands mono PCM to the visualizer.
+// Package player plays a stream through two ffmpeg processes with the player
+// in between:
+//
+//	decoder ffmpeg ──PCM──▶ player (volume, delay, visualizer tap) ──PCM──▶ speaker ffmpeg
+//
+// The decoder always hands over one fixed format, so when a live stream
+// changes format at a track boundary only the decoder rebuilds its filters;
+// the speaker side never sees the change and plays one unbroken stream. The
+// volume lives in the player, so a rebuild can't reset it either.
 package player
 
 import (
@@ -21,6 +28,15 @@ import (
 // DefaultSource is the link Claude Code's own /radio command opens.
 const DefaultSource = "https://clau.de/radio"
 
+// The PCM format between the processes: 48 kHz stereo s16le, 4 bytes a frame.
+const (
+	playRate   = 48000
+	frameBytes = 4
+)
+
+// The visualizer tap halves the rate; the analyzer must expect exactly that.
+const _ = uint(playRate/2-spectrum.SampleRate) + uint(spectrum.SampleRate-playRate/2)
+
 type State string
 
 const (
@@ -41,7 +57,8 @@ type Status struct {
 }
 
 type Config struct {
-	// Output is the ffmpeg audio device: audiotoolbox, pulse, alsa or null.
+	// Output is where the sound goes: audiotoolbox, pulse, alsa, null (no
+	// sound, visualizer only) or file:<path> (a WAV recording, for testing).
 	Output string
 	// Volume is 0–100.
 	Volume int
@@ -49,10 +66,12 @@ type Config struct {
 	DelayMs int
 	// YtDlpArgs go before the URL on every yt-dlp run (e.g. --cookies-from-browser).
 	YtDlpArgs []string
-	// OnSamples receives mono s16 PCM at spectrum.SampleRate, from ffmpeg's goroutine.
+	// OnSamples receives mono s16 PCM at spectrum.SampleRate.
 	OnSamples func([]int16)
 	// OnChange receives every status change.
 	OnChange func(Status)
+	// Log receives ffmpeg's warnings, a line at a time; nil drops them.
+	Log func(string)
 }
 
 type Player struct {
@@ -62,7 +81,6 @@ type Player struct {
 	st     Status
 	cancel context.CancelFunc
 	done   chan struct{}
-	stdin  io.Writer
 }
 
 func New(cfg Config) *Player {
@@ -120,14 +138,10 @@ func (p *Player) halt() bool {
 	return true
 }
 
-// SetVolume changes the volume, live when ffmpeg is running.
+// SetVolume changes the volume; the pump ramps to it over its next chunk.
 func (p *Player) SetVolume(v int) {
 	p.mu.Lock()
 	p.st.Volume = clampVolume(v)
-	if p.stdin != nil {
-		// ffmpeg's interactive 'c' command: target, time (-1 = now), command, argument.
-		fmt.Fprintf(p.stdin, "cvolume -1 volume %.4f\n", gain(p.st.Volume))
-	}
 	st := p.st
 	p.mu.Unlock()
 	p.notify(st)
@@ -161,60 +175,97 @@ func (p *Player) once(ctx context.Context, source string) error {
 	}
 	p.mu.Lock()
 	p.st.Title = title
-	vol := p.st.Volume
 	p.mu.Unlock()
 
-	cmd := exec.CommandContext(ctx, "ffmpeg", ffmpegArgs(input, p.cfg.Output, gain(vol), p.cfg.DelayMs)...)
-	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
-	cmd.WaitDelay = 3 * time.Second
-	stdin, err := cmd.StdinPipe()
+	// Either process ending takes the other down with it.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sinkArgs := speakerArgs(p.cfg.Output)
+	// Only a sound card paces the stream; without one, read at the native rate.
+	isUnpaced := sinkArgs == nil || strings.HasPrefix(p.cfg.Output, "file:")
+	decoder, decoderErr := p.ffmpeg(ctx, decoderArgs(input, isUnpaced))
+	decoded, err := decoder.StdoutPipe()
 	if err != nil {
 		return err
 	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	stderr := &tail{max: 2048}
-	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
+	if err := decoder.Start(); err != nil {
 		return fmt.Errorf("ffmpeg: %w", err)
 	}
 
-	p.mu.Lock()
-	p.stdin = stdin
-	p.mu.Unlock()
-	defer func() {
-		p.mu.Lock()
-		p.stdin = nil
-		p.mu.Unlock()
-	}()
-
-	p.pump(stdout)
-
-	if err := cmd.Wait(); err != nil {
-		if msg := stderr.String(); msg != "" {
-			return errors.New(msg)
+	var speaker *exec.Cmd
+	var speakerErr *tail
+	var speakerIn io.WriteCloser
+	if sinkArgs != nil {
+		speaker, speakerErr = p.ffmpeg(ctx, sinkArgs)
+		if speakerIn, err = speaker.StdinPipe(); err != nil {
+			return err
 		}
-		return fmt.Errorf("ffmpeg: %w", err)
+		if err := speaker.Start(); err != nil {
+			return fmt.Errorf("ffmpeg: %w", err)
+		}
+		// Silence up front delays everything after it by the same amount.
+		if p.cfg.DelayMs > 0 {
+			_, _ = speakerIn.Write(make([]byte, playRate*p.cfg.DelayMs/1000*frameBytes))
+		}
+	}
+
+	// What ffmpeg says while being told to stop is noise, not news.
+	context.AfterFunc(ctx, func() {
+		decoderErr.Mute()
+		if speakerErr != nil {
+			speakerErr.Mute()
+		}
+	})
+
+	p.pump(decoded, speakerIn)
+	cancel()
+	decodeExit := decoder.Wait()
+	var speakerExit error
+	if speaker != nil {
+		speakerIn.Close()
+		speakerExit = speaker.Wait()
+	}
+
+	switch {
+	case decodeExit != nil && decoderErr.Last() != "":
+		return errors.New(decoderErr.Last())
+	case speakerExit != nil && speakerErr.Last() != "":
+		return errors.New(speakerErr.Last())
+	case decodeExit != nil:
+		return fmt.Errorf("ffmpeg: %w", decodeExit)
 	}
 	return errors.New("stream ended")
 }
 
-// pump reads s16le PCM until ffmpeg closes stdout, marking the player
-// playing once the first samples arrive.
-func (p *Player) pump(r io.Reader) {
-	buf := make([]byte, 4096)
+func (p *Player) ffmpeg(ctx context.Context, args []string) (*exec.Cmd, *tail) {
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 3 * time.Second
+	stderr := &tail{max: 2048, log: p.cfg.Log}
+	cmd.Stderr = stderr
+	return cmd, stderr
+}
+
+// pump moves PCM from the decoder to the speakers, applying the volume and
+// handing the visualizer a mono copy, until the decoder or speakers stop.
+func (p *Player) pump(r io.Reader, w io.Writer) {
+	buf := make([]byte, 16384)
 	var carry []byte
+	current := p.gain()
 	isFirst := true
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
 			data := append(carry, buf[:n]...)
-			whole := len(data) &^ 1
-			samples := make([]int16, whole/2)
-			for i := range samples {
-				samples[i] = int16(binary.LittleEndian.Uint16(data[2*i:]))
+			whole := len(data) &^ (frameBytes - 1)
+			target := p.gain()
+			mono := applyGain(data[:whole], current, target)
+			current = target
+			if w != nil {
+				if _, err := w.Write(data[:whole]); err != nil {
+					return
+				}
 			}
 			carry = append(carry[:0], data[whole:]...)
 			if isFirst {
@@ -222,7 +273,7 @@ func (p *Player) pump(r io.Reader) {
 				p.setState(Playing, "")
 			}
 			if p.cfg.OnSamples != nil {
-				p.cfg.OnSamples(samples)
+				p.cfg.OnSamples(mono)
 			}
 		}
 		if err != nil {
@@ -231,34 +282,66 @@ func (p *Player) pump(r io.Reader) {
 	}
 }
 
-func ffmpegArgs(input []string, output string, gain float64, delayMs int) []string {
-	args := []string{"-hide_banner", "-loglevel", "error", "-nostats"}
-	if output == "null" {
-		// No sound card to pace the decode, so read at the native rate instead.
+// applyGain scales stereo s16le frames in place, ramping from one gain to the
+// next across the chunk so a volume change never clicks. It returns the
+// unscaled audio as mono at half the rate, for the visualizer.
+func applyGain(frames []byte, from, to float64) []int16 {
+	count := len(frames) / frameBytes
+	mono := make([]int16, count/2)
+	var pair int
+	for i := range count {
+		at := i * frameBytes
+		l := int(int16(binary.LittleEndian.Uint16(frames[at:])))
+		r := int(int16(binary.LittleEndian.Uint16(frames[at+2:])))
+		if i%2 == 0 {
+			pair = l + r
+		} else if i/2 < len(mono) {
+			// Averaging each pair of frames is a gentle low-pass before halving the rate.
+			mono[i/2] = int16((pair + l + r) / 4)
+		}
+		g := from + (to-from)*float64(i+1)/float64(count)
+		binary.LittleEndian.PutUint16(frames[at:], uint16(scale(l, g)))
+		binary.LittleEndian.PutUint16(frames[at+2:], uint16(scale(r, g)))
+	}
+	return mono
+}
+
+func scale(s int, g float64) int16 {
+	return int16(min(max(math.Round(float64(s)*g), math.MinInt16), math.MaxInt16))
+}
+
+// decoderArgs turns the input into the fixed PCM format on stdout, reading
+// the input at its native rate when nothing downstream sets the pace.
+func decoderArgs(input []string, isUnpaced bool) []string {
+	args := []string{"-hide_banner", "-loglevel", "warning", "-nostats", "-nostdin"}
+	if isUnpaced {
 		args = append(args, "-re")
 	}
 	args = append(args, input...)
+	return append(args, "-vn", "-ac", "2", "-ar", fmt.Sprint(playRate), "-f", "s16le", "pipe:1")
+}
 
-	play := fmt.Sprintf("[p]volume=%.4f", gain)
-	if delayMs > 0 {
-		play += fmt.Sprintf(",adelay=%d:all=1", delayMs)
+// speakerArgs plays the fixed PCM format from stdin; nil for no speakers.
+func speakerArgs(output string) []string {
+	args := []string{"-hide_banner", "-loglevel", "warning", "-nostats",
+		"-f", "s16le", "-ar", fmt.Sprint(playRate), "-ch_layout", "stereo", "-i", "pipe:0"}
+	switch {
+	case output == "audiotoolbox":
+		return append(args, "-f", "audiotoolbox", "-")
+	case output == "pulse":
+		return append(args, "-f", "pulse", "cc-fm")
+	case output == "alsa":
+		return append(args, "-f", "alsa", "default")
+	case strings.HasPrefix(output, "file:"):
+		return append(args, "-y", "-f", "wav", strings.TrimPrefix(output, "file:"))
 	}
-	graph := "[0:a]asplit=2[p][v];" + play + "[po];" +
-		fmt.Sprintf("[v]aresample=%d,aformat=sample_fmts=s16:channel_layouts=mono[vo]", spectrum.SampleRate)
-	args = append(args, "-filter_complex", graph, "-map", "[po]")
+	return nil
+}
 
-	switch output {
-	case "audiotoolbox":
-		args = append(args, "-f", "audiotoolbox", "-")
-	case "pulse":
-		args = append(args, "-f", "pulse", "cc-fm")
-	case "alsa":
-		args = append(args, "-f", "alsa", "default")
-	default:
-		args = append(args, "-f", "null", "-")
-	}
-
-	return append(args, "-map", "[vo]", "-f", "s16le", "pipe:1")
+func (p *Player) gain() float64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return gain(p.st.Volume)
 }
 
 func (p *Player) setState(s State, errMsg string) {
@@ -287,11 +370,13 @@ func errText(err error) string {
 	return err.Error()
 }
 
-// tail keeps the last max bytes written, trimmed to whole lines.
+// tail keeps the last max bytes written and passes each whole line to log.
 type tail struct {
-	mu  sync.Mutex
-	max int
-	buf []byte
+	mu      sync.Mutex
+	max     int
+	buf     []byte
+	pending []byte
+	log     func(string)
 }
 
 func (t *tail) Write(b []byte) (int, error) {
@@ -301,10 +386,31 @@ func (t *tail) Write(b []byte) (int, error) {
 	if over := len(t.buf) - t.max; over > 0 {
 		t.buf = t.buf[over:]
 	}
+	if t.log != nil {
+		t.pending = append(t.pending, b...)
+		for {
+			i := strings.IndexByte(string(t.pending), '\n')
+			if i < 0 {
+				break
+			}
+			if line := strings.TrimSpace(string(t.pending[:i])); line != "" {
+				t.log(line)
+			}
+			t.pending = t.pending[i+1:]
+		}
+	}
 	return len(b), nil
 }
 
-func (t *tail) String() string {
+// Mute stops passing lines to log; Last still works.
+func (t *tail) Mute() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.log = nil
+}
+
+// Last is the last line written, the one that usually says what went wrong.
+func (t *tail) Last() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	lines := strings.Split(strings.TrimSpace(string(t.buf)), "\n")

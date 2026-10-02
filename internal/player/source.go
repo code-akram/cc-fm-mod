@@ -116,5 +116,5 @@ const demoGraph = "aevalsrc=exprs=" +
 	"+0.05*(2*mod(t*1.5*(110+27.5*floor(mod(t\\,8)/2))\\,1)-1)" +
 	"+0.04*(2*mod(t*2*(110+27.5*floor(mod(t\\,8)/2))\\,1)-1)" +
 	":s=44100[k];anoisesrc=color=pink:amplitude=0.6[n];" +
-	"anoisesrc=color=white:amplitude=0.5,highpass=f=6000,volume='0.6*exp(-40*mod(t-0.25\\,0.5))':eval=frame[h];" +
+	"anoisesrc=color=white:amplitude=0.5,highpass=f=6000,volume='if(isnan(t)\\,0\\,0.6*exp(-40*mod(t+0.25\\,0.5)))':eval=frame[h];" +
 	"[k][n][h]amix=inputs=3:normalize=0:weights=1 0.015 1[out0]"

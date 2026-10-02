@@ -12,7 +12,7 @@ import (
 // TestTrack prints how each column behaves over a whole track, for tuning.
 // It runs only when CC_FM_TRACK names raw mono s16le PCM at SampleRate:
 //
-//	ffmpeg -i song.ogg -ac 1 -ar 22050 -f s16le song.raw
+//	ffmpeg -i song.ogg -ac 1 -ar 24000 -f s16le song.raw
 //	CC_FM_TRACK=song.raw go test -run TestTrack -v ./internal/spectrum/
 func TestTrack(t *testing.T) {
 	path := os.Getenv("CC_FM_TRACK")

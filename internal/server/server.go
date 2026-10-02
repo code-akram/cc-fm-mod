@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -56,7 +57,14 @@ func New(cfg player.Config, bands int, version string) *Server {
 		s.an.Push(samples)
 		s.anMu.Unlock()
 	}
-	cfg.OnChange = func(player.Status) { s.broadcast(s.statusLine()) }
+	var last player.Status
+	cfg.OnChange = func(st player.Status) {
+		if st.State != last.State || st.Error != last.Error {
+			log.Printf("%s %s%s", st.State, st.Title, prefixed(" · ", st.Error))
+		}
+		last = st
+		s.broadcast(s.statusLine())
+	}
 	s.Player = player.New(cfg)
 	return s
 }
@@ -199,6 +207,13 @@ func (s *Server) info() Info {
 func (s *Server) statusLine() []byte {
 	b, _ := json.Marshal(s.info())
 	return append(append([]byte("S "), b...), '\n')
+}
+
+func prefixed(sep, s string) string {
+	if s == "" {
+		return ""
+	}
+	return sep + s
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

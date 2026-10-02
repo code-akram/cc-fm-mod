@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -102,7 +103,7 @@ func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	sock := fs.String("socket", socketPath(), "unix socket to listen on")
 	tcp := fs.String("tcp", "", "also listen on this TCP address (e.g. 127.0.0.1:47130)")
-	output := fs.String("output", "auto", "audio device: auto, audiotoolbox, pulse, alsa or null")
+	output := fs.String("output", "auto", "audio device: auto, audiotoolbox, pulse, alsa, null, or file:<path> to record a WAV")
 	volume := fs.Int("volume", 70, "starting volume, 0-100")
 	delay := fs.Int("delay-ms", 0, "hold the speakers back so remote bars line up with the sound")
 	bands := fs.Int("bands", 32, "bars per frame")
@@ -120,11 +121,14 @@ func serve(args []string) error {
 	}
 	defer removeIfOurs(*sock)
 
+	log.SetFlags(log.Ldate | log.Ltime)
+	log.SetPrefix("cc-fm: ")
 	srv := server.New(player.Config{
 		Output:    *output,
 		Volume:    *volume,
 		DelayMs:   *delay,
 		YtDlpArgs: strings.Fields(*ytArgs),
+		Log:       func(line string) { log.Print("ffmpeg: ", line) },
 	}, *bands, version)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

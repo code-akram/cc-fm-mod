@@ -4,8 +4,9 @@ package spectrum
 import "math"
 
 const (
-	// SampleRate is the rate the analyzer expects its samples at.
-	SampleRate = 22050
+	// SampleRate is the rate the analyzer expects its samples at: the
+	// player's 48 kHz, halved.
+	SampleRate = 24000
 
 	fftSize = 2048
 	minHz   = 45.0
