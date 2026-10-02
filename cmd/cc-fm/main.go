@@ -118,7 +118,7 @@ func serve(args []string) error {
 	_ = fs.Parse(args)
 
 	// The last volume set wins over the default, but not over --volume.
-	saved := loadState()
+	saved := loadState(statePath(*sock))
 	isVolumeSet := false
 	fs.Visit(func(f *flag.Flag) { isVolumeSet = isVolumeSet || f.Name == "volume" })
 	if !isVolumeSet && saved.Volume != nil {
@@ -155,7 +155,7 @@ func serve(args []string) error {
 		Log:       func(line string) { log.Print(line) },
 		Record:    recording,
 		OnVolume: func(v int) {
-			if err := saveState(state{Volume: &v}); err != nil {
+			if err := saveState(statePath(*sock), state{Volume: &v}); err != nil {
 				log.Print("saving the volume: ", err)
 			}
 		},
@@ -244,18 +244,24 @@ type state struct {
 	Volume *int `json:"volume,omitempty"`
 }
 
-func statePath() string {
+// statePath is where a player keeps its state: ~/.cc-fm/state.json for the
+// default socket, and beside the socket for any other, so a second player
+// (or a test) never overwrites the main one's volume.
+func statePath(sock string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".cc-fm", "state.json")
+	if sock == "" || sock == filepath.Join(home, ".cc-fm", "fm.sock") {
+		return filepath.Join(home, ".cc-fm", "state.json")
+	}
+	return sock + ".state.json"
 }
 
 // loadState reads the saved state; missing or unreadable, it starts empty.
-func loadState() state {
+func loadState(path string) state {
 	var s state
-	if b, err := os.ReadFile(statePath()); err == nil {
+	if b, err := os.ReadFile(path); err == nil {
 		_ = json.Unmarshal(b, &s)
 	}
 	if s.Volume != nil && (*s.Volume < 0 || *s.Volume > 100) {
@@ -266,8 +272,7 @@ func loadState() state {
 
 // saveState writes the state through a temporary file, so a crash mid-write
 // never leaves a half-written one behind.
-func saveState(s state) error {
-	path := statePath()
+func saveState(path string, s state) error {
 	if path == "" {
 		return errors.New("no home directory")
 	}

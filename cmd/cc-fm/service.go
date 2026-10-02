@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // service keeps the player running at login: a launchd agent on macOS, a
@@ -167,6 +168,13 @@ func (s serviceDef) uninstall(dryRun bool) error {
 	for _, step := range steps {
 		_ = exec.Command(step[0], step[1:]...).Run()
 	}
+	// launchctl bootout returns before the agent has exited; wait for it,
+	// so the player's socket is gone and status is right when this returns.
+	if s.isLaunchd {
+		for deadline := time.Now().Add(10 * time.Second); s.isRunning() && time.Now().Before(deadline); {
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
 	if err := os.Remove(s.file); err != nil {
 		return err
 	}
@@ -182,18 +190,21 @@ func (s serviceDef) status() error {
 		fmt.Printf("%s: not installed\n", s.label)
 		return nil
 	}
-	var check *exec.Cmd
-	if s.isLaunchd {
-		check = exec.Command("launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), s.label))
-	} else {
-		check = exec.Command("systemctl", "--user", "is-active", "--quiet", s.label)
-	}
 	state := "installed, not running"
-	if check.Run() == nil {
+	if s.isRunning() {
 		state = "installed and running"
 	}
 	fmt.Printf("%s: %s\n  %s\n", s.label, state, s.file)
 	return nil
+}
+
+// isRunning says whether launchd or systemd has the player running.
+func (s serviceDef) isRunning() bool {
+	if s.isLaunchd {
+		out, err := exec.Command("launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), s.label)).Output()
+		return err == nil && strings.Contains(string(out), "state = running")
+	}
+	return exec.Command("systemctl", "--user", "is-active", "--quiet", s.label).Run() == nil
 }
 
 // servicePath is the PATH a service runs with: wherever ffmpeg and yt-dlp
