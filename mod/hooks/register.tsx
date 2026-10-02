@@ -6,6 +6,8 @@ import { encodeCells, parseLine, resample, splitLines } from './bars'
 import { RED, VIOLET, keyHint, listening, meter, railed, stateItem } from './views'
 
 const status = atom({ plugin: 'cc-fm-mod', key: 'status' } as const, { state: 'offline' } as FmStatus)
+// Whether the controls above the composer are showing (/fm keys).
+const isKeysOpen = atom({ plugin: 'cc-fm-mod', key: 'isKeysOpen' } as const, false)
 
 const COLUMNS = 24
 // Below this width the hint row keeps all its room for the engine's own line.
@@ -21,10 +23,8 @@ const RESYNC_EVERY = 60
 
 // Volume change per press of j or k in the controls.
 const VOLUME_STEP = 5
-// The controls pane /fm keys opens, and the room its rail needs.
-const PANE = 'cc-fm'
-const PANE_ROWS = 10
-const PANE_COLUMNS = 54
+// Rows the controls need for the full rail; with fewer they take one line.
+const RAIL_ROWS = 9
 
 // What /fm takes, for its typeahead line and its usage reply.
 const COMMANDS: [string, string][] = [
@@ -151,7 +151,7 @@ const VIOLET_ITEM = VIOLET
 // Whether a /fm argument is one it knows, rather than a typo for usage.
 function isCommandWord(word: string, verb: string): boolean {
   return (
-    ['toggle', 'stop', 'off', 'play', 'on', 'vol', 'volume', 'status', 'keys', 'help'].includes(word) ||
+    ['stop', 'off', 'play', 'on', 'vol', 'volume', 'status', 'keys', 'help'].includes(word) ||
     /^\d+$/.test(word) ||
     verb.includes('://')
   )
@@ -201,17 +201,16 @@ export const register: Register = on => {
     const word = verb.toLowerCase()
     try {
       if (word === 'keys') {
-        // Opened by the person's command, the pane takes the keyboard at once:
-        // no chord to learn, and esc closes it.
-        await $.ui.open({ id: PANE, title: 'claude.fm', focus: true, closeOnEscape: true, rows: PANE_ROWS, columns: PANE_COLUMNS })
+        await update($, isKeysOpen, isOpen => !isOpen)
         return {}
       }
-      if (word === 'help' || (word !== '' && !isCommandWord(word, verb))) {
-        return reply({ kind: 'usage' })
+      if (word === 'help') return reply({ kind: 'usage' })
+      if (word !== '' && !isCommandWord(word, verb)) {
+        return reply({ kind: 'error', message: `/fm doesn’t take “${verb}”` })
       }
 
       let st: FmStatus
-      if (word === '' || word === 'toggle') {
+      if (word === '') {
         const now = await api($, 'GET', '/v1/status')
         const isOn = now.state === 'playing' || now.state === 'connecting' || now.state === 'retrying'
         st = await api($, 'POST', isOn ? '/v1/stop' : '/v1/play')
@@ -288,53 +287,91 @@ export const register: Register = on => {
     }
   })
 
-  // The controls pane /fm keys opens. With the keyboard it is lit and says
-  // how to leave; without it, it recedes and says how to take it back, the
-  // only place the chord appears.
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+  // The controls above the composer, opened by /fm keys. Digits drive them,
+  // as Claude Code's own surveys: a bare digit typed into an empty prompt
+  // presses the button, so there's no chord to learn and nothing to focus.
+  // The rail is lit while they're up; typing a message is unaffected.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.surface !== 'terminal' || e.props.hasSurvey || !(await read($, isKeysOpen))) return next(e)
     const ui = $.ui.resolve(e)
     const { Box, Button, Text } = ui
     const st = await read($, status)
-    const isFocused = e.props.isFocused
     const volume = st.volume ?? 0
     const isPlaying = st.state === 'playing'
     const isStopped = st.state === 'stopped' || st.state === 'offline'
 
-    const transport = (
-      <Box flexDirection="row" gap={4}>
-        <Button key="play" hotkey="p" plain label="play" dimColor={!isFocused || isPlaying} onPress={() => control($, 'POST', '/v1/play')} />
-        <Button key="stop" hotkey="s" plain label="stop" dimColor={!isFocused || isStopped} onPress={() => control($, 'POST', '/v1/stop')} />
-      </Box>
+    const play = <Button key="play" hotkey="1" plain label="play" dimColor={isPlaying} onPress={() => control($, 'POST', '/v1/play')} />
+    const stop = <Button key="stop" hotkey="2" plain label="stop" dimColor={isStopped} onPress={() => control($, 'POST', '/v1/stop')} />
+    const quieter = (
+      <Button
+        key="down"
+        hotkey="3"
+        plain
+        label="quieter"
+        dimColor={volume === 0}
+        onPress={() => control($, 'POST', '/v1/volume', { volume: Math.max(0, volume - VOLUME_STEP) })}
+      />
     )
-    const level = (
-      <Box flexDirection="row" gap={2}>
-        <Button
-          key="down"
-          hotkey="j"
-          plain
-          label="quieter"
-          dimColor={!isFocused || volume === 0}
-          onPress={() => control($, 'POST', '/v1/volume', { volume: Math.max(0, volume - VOLUME_STEP) })}
-        />
-        {meter(ui, volume, !isFocused)}
-        <Text dimColor={!isFocused}>{String(volume).padStart(3)}</Text>
-        <Button
-          key="up"
-          hotkey="k"
-          plain
-          label="louder"
-          dimColor={!isFocused || volume === 100}
-          onPress={() => control($, 'POST', '/v1/volume', { volume: Math.min(100, volume + VOLUME_STEP) })}
-        />
-      </Box>
+    const louder = (
+      <Button
+        key="up"
+        hotkey="4"
+        plain
+        label="louder"
+        dimColor={volume === 100}
+        onPress={() => control($, 'POST', '/v1/volume', { volume: Math.min(100, volume + VOLUME_STEP) })}
+      />
     )
-    const footer = isFocused ? keyHint(ui, 'esc', 'close') : keyHint(ui, 'ctrl+x tab', 'take the controls')
+    const close = <Button key="close" hotkey="0" plain label="close" onPress={() => update($, isKeysOpen, () => false)} />
+
+    if (e.props.maxRows < RAIL_ROWS) {
+      return (
+        <Box flexDirection="row" gap={2}>
+          <Text bold>♪ claude.fm</Text>
+          {stateItem(ui, st).content}
+          {play}
+          {stop}
+          {quieter}
+          <Text>{volume}</Text>
+          {louder}
+          {close}
+        </Box>
+      )
+    }
 
     return railed(
       ui,
-      [stateItem(ui, st, undefined, !isFocused), { glyph: '◇', color: VIOLET_ITEM, content: transport }, { glyph: '◇', color: VIOLET_ITEM, content: level }],
-      footer,
-      isFocused ? 'active' : 'receded',
+      [
+        stateItem(ui, st),
+        {
+          glyph: '◇',
+          color: VIOLET_ITEM,
+          content: (
+            <Box flexDirection="row" gap={4}>
+              {play}
+              {stop}
+            </Box>
+          ),
+        },
+        {
+          glyph: '◇',
+          color: VIOLET_ITEM,
+          content: (
+            <Box flexDirection="row" gap={2}>
+              {quieter}
+              {meter(ui, volume)}
+              <Text>{String(volume).padStart(3)}</Text>
+              {louder}
+            </Box>
+          ),
+        },
+      ],
+      <Box flexDirection="row" gap={2}>
+        {close}
+        <Text dimColor>·  from an empty prompt</Text>
+      </Box>,
+      'active',
+      e.props.maxRows > RAIL_ROWS,
     )
   })
 

@@ -26,8 +26,8 @@ export type Item = { glyph: string; color?: string; content: RenderNode }
 export type Mode = 'static' | 'active' | 'receded'
 
 // A railed block: the title, items with a connector between each, and a
-// closing line.
-export function railed(ui: Ui, items: Item[], footer: RenderNode, mode: Mode = 'static'): RenderElement {
+// closing line, after a blank line unless isSpaced is false.
+export function railed(ui: Ui, items: Item[], footer: RenderNode, mode: Mode = 'static', isSpaced = true): RenderElement {
   const { Box, Text } = ui
   const isDim = mode === 'receded'
   const railColor = mode === 'active' ? CORAL : undefined
@@ -63,7 +63,7 @@ export function railed(ui: Ui, items: Item[], footer: RenderNode, mode: Mode = '
     </Box>,
   )
   return (
-    <Box flexDirection="column" marginTop={1}>
+    <Box flexDirection="column" marginTop={isSpaced ? 1 : 0}>
       {rows}
     </Box>
   )
