@@ -32,6 +32,13 @@ It reads two environment variables, `CC_FM_SOCKET` and `HOME`, to find the socke
 
 It also hooks two Claude Code events, `ui.focus` and `ui.press`, only to notice when `ctrl+x tab` moves into its own controls or a key is pressed there, so it can light the rail. It passes both events on unchanged and ignores any that aren't for its own controls.
 
+### For reviewers
+
+- **Hosts it contacts:** none. Every `$.http.fetch` call goes to the URL `http://cc-fm/…` with `socketPath` set to the player's unix socket. The request never touches the network: `cc-fm` is only the HTTP Host header on a local socket. The socket path is `$CC_FM_SOCKET` if set, otherwise `$HOME/.cc-fm/fm.sock`. Over SSH, that socket may be forwarded to the user's own machine by an SSH `RemoteForward` the user sets up; the mod doesn't create or change that forward.
+- **What it reads, and where it goes:** it reads `HOME` and `CC_FM_SOCKET` only to build that socket path. Neither value is sent anywhere. The requests carry only the query values `after` (a frame counter), `wait` and `client` (a random id made at startup), and the JSON bodies `{"source": …}` (the URL or word you typed after `/fm play`) and `{"volume": …}`.
+- **What it fetches:** bar frames and the player's status, as JSON. The mod draws them. It never runs, evaluates or executes anything it receives.
+- **What it runs:** no commands, tools or agents of any kind. Its `command.run` hook answers only the mod's own `/fm` command, matched by name, and returns text to show. It doesn't see, change or run any other command. It registers that one command, `/fm`, and nothing else.
+
 ## License
 
 MIT
