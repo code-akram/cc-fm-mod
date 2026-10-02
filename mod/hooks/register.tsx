@@ -20,8 +20,13 @@ const IDLE_EVERY = 4
 // Frames between checks that the session's state still holds the status.
 const RESYNC_EVERY = 60
 
-// Volume change per press of a control-row key.
+// Volume change per press of j or k in the controls.
 const VOLUME_STEP = 5
+// Rows the controls need for their spaced, three-line layout.
+const SPACIOUS_ROWS = 5
+// Cells in the controls' volume meter.
+const METER_CELLS = 16
+const CORAL = '#d97757'
 
 const USAGE = '/fm toggles · /fm stop · /fm vol 40 · /fm status · /fm keys · /fm play <url>'
 
@@ -182,11 +187,7 @@ export const register: Register = on => {
       } else if (word === 'keys') {
         const isOpen = !(await read($, isKeysOpen))
         await update($, isKeysOpen, () => isOpen)
-        return {
-          text: isOpen
-            ? 'Controls are above the prompt: ctrl+x tab to focus them, then p play/stop · j/k volume · x close · esc back.'
-            : 'Controls closed.',
-        }
+        return { text: isOpen ? 'Controls open above the prompt · ctrl+x tab to use them' : 'Controls closed' }
       } else if (word === 'status') {
         st = await api($, 'GET', '/v1/status')
       } else {
@@ -200,44 +201,100 @@ export const register: Register = on => {
     }
   })
 
-  // The control row above the prompt, shown by /fm keys: hotkeys work once
-  // ctrl+x tab focuses it, and each one is a clickable button too.
+  // The controls above the prompt, shown by /fm keys. Three lines with room
+  // between them where the band has it (state; transport and volume; how to
+  // use them), one line where it doesn't. Hotkeys work once ctrl+x tab
+  // focuses the band, and every button clicks too.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const st = await read($, status)
     if (!(await read($, isKeysOpen)) || e.props.hasSurvey || st.state === 'offline') {
       return next(e)
     }
     const { Box, Button, Text } = $.ui.resolve(e)
-    const isOn = st.state === 'playing' || st.state === 'connecting' || st.state === 'retrying'
     const volume = st.volume ?? 0
+    const isPlaying = st.state === 'playing'
+    const isStopped = st.state === 'stopped'
+    const stateLabel =
+      st.state === 'playing' ? 'playing' : st.state === 'stopped' ? 'stopped' : st.state === 'connecting' ? 'connecting…' : 'reconnecting…'
 
+    const play = <Button key="play" hotkey="p" plain label="play" dimColor={isPlaying} onPress={() => control($, 'POST', '/v1/play')} />
+    const stop = <Button key="stop" hotkey="s" plain label="stop" dimColor={isStopped} onPress={() => control($, 'POST', '/v1/stop')} />
+    const quieter = (
+      <Button
+        key="down"
+        hotkey="j"
+        plain
+        label="quieter"
+        dimColor={volume === 0}
+        onPress={() => control($, 'POST', '/v1/volume', { volume: Math.max(0, volume - VOLUME_STEP) })}
+      />
+    )
+    const louder = (
+      <Button
+        key="up"
+        hotkey="k"
+        plain
+        label="louder"
+        dimColor={volume === 100}
+        onPress={() => control($, 'POST', '/v1/volume', { volume: Math.min(100, volume + VOLUME_STEP) })}
+      />
+    )
+    const close = <Button key="close" hotkey="x" plain label="close" onPress={() => update($, isKeysOpen, () => false)} />
+    const state = (
+      <Text color={isPlaying ? CORAL : undefined} dimColor={!isPlaying}>
+        ● {stateLabel}
+      </Text>
+    )
+
+    // Not enough room for three spaced lines: one line, same keys.
+    if (e.props.maxRows < SPACIOUS_ROWS) {
+      return (
+        <Box flexDirection="row" gap={2}>
+          <Text bold>♪ claude.fm</Text>
+          {state}
+          {play}
+          {stop}
+          {quieter}
+          <Text>{volume}</Text>
+          {louder}
+          {close}
+        </Box>
+      )
+    }
+
+    const filled = Math.round((volume / 100) * METER_CELLS)
     return (
-      <Box flexDirection="row" gap={2}>
-        <Text dimColor>♪ claude.fm</Text>
-        <Button
-          key="toggle"
-          hotkey="p"
-          plain
-          label={isOn ? 'stop' : 'play'}
-          onPress={() => control($, 'POST', isOn ? '/v1/stop' : '/v1/play')}
-        />
-        <Button
-          key="down"
-          hotkey="j"
-          plain
-          label="vol −"
-          onPress={() => control($, 'POST', '/v1/volume', { volume: Math.max(0, volume - VOLUME_STEP) })}
-        />
-        <Text>{volume}</Text>
-        <Button
-          key="up"
-          hotkey="k"
-          plain
-          label="vol +"
-          onPress={() => control($, 'POST', '/v1/volume', { volume: Math.min(100, volume + VOLUME_STEP) })}
-        />
-        <Button key="close" hotkey="x" plain label="close" onPress={() => update($, isKeysOpen, () => false)} />
-        <Text dimColor>ctrl+x tab · esc</Text>
+      <Box flexDirection="column" paddingX={1}>
+        <Box flexDirection="row" gap={3}>
+          <Text bold>♪ claude.fm</Text>
+          {state}
+        </Box>
+        <Box flexDirection="row" gap={6} marginTop={1}>
+          <Box flexDirection="row" gap={3}>
+            {play}
+            {stop}
+          </Box>
+          <Box flexDirection="row" gap={2}>
+            {quieter}
+            <Text>
+              <Text color={CORAL}>{'━'.repeat(filled)}</Text>
+              <Text dimColor>{'─'.repeat(METER_CELLS - filled)}</Text>
+            </Text>
+            <Text>{String(volume).padStart(3)}</Text>
+            {louder}
+          </Box>
+        </Box>
+        <Box flexDirection="row" gap={6} marginTop={1}>
+          <Text>
+            <Text bold>ctrl+x tab</Text>
+            <Text dimColor>  use these keys</Text>
+          </Text>
+          <Text>
+            <Text bold>esc</Text>
+            <Text dimColor>  back to the prompt</Text>
+          </Text>
+          {close}
+        </Box>
       </Box>
     )
   })
