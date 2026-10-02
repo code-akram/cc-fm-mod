@@ -11,7 +11,7 @@ The player (`cc-fm serve`) speaks HTTP on a unix socket, `~/.cc-fm/fm.sock` by d
 | `POST /v1/stop` | none | stop |
 | `POST /v1/volume` | `{"volume": 0-100}` | set the volume, live |
 
-Each command answers with the status object.
+Each command answers with the status object. `POST /v1/play` refuses (`403`) any source but `demo`, an empty one or an `http(s)` URL. Requests may arrive from another machine through the SSH forward, and local paths and ffmpeg graphs would reach this machine's files.
 
 ## Status
 

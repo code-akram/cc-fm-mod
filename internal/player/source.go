@@ -36,7 +36,7 @@ func resolve(ctx context.Context, source string, ytDlpArgs []string) ([]string, 
 	}
 
 	if !needsYtDlp(u.Hostname()) {
-		return []string{"-i", source}, source, nil
+		return append(networkOnly(), "-i", source), source, nil
 	}
 
 	yt, err := YtDlpPath()
@@ -59,7 +59,29 @@ func resolve(ctx context.Context, source string, ytDlpArgs []string) ([]string, 
 		return nil, "", errors.New("yt-dlp printed no stream URL")
 	}
 
-	return []string{"-i", strings.TrimSpace(lines[1])}, strings.TrimSpace(lines[0]), nil
+	return append(networkOnly(), "-i", strings.TrimSpace(lines[1])), strings.TrimSpace(lines[0]), nil
+}
+
+// networkOnly keeps ffmpeg to network protocols for a URL, so a playlist
+// can't point it at local files or other protocols.
+func networkOnly() []string {
+	return []string{"-protocol_whitelist", "http,https,tcp,tls,crypto,data"}
+}
+
+// CheckRemote says whether a source may be played on request over the
+// socket, where a session on another machine may be the one asking. Only
+// demo and http(s) URLs may: a local path or an ffmpeg graph would let
+// whoever reaches the socket read, and with some filters write, files on
+// this machine. Those remain available to `cc-fm serve --autoplay`.
+func CheckRemote(source string) error {
+	if source == "" || source == "demo" {
+		return nil
+	}
+	if u, err := url.Parse(source); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+		return nil
+	}
+	return errors.New("only http(s) URLs and demo can be played on request; " +
+		"play local files and lavfi graphs with cc-fm serve --autoplay")
 }
 
 func needsYtDlp(host string) bool {

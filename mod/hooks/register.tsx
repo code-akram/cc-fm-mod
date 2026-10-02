@@ -10,7 +10,10 @@ const COLUMNS = 24
 // Below this width the hint row keeps all its room for the engine's own line.
 const MIN_VIEWPORT = 72
 const RETRY_MS = 3000
-// A session nobody is typing in or waiting on paints every 4th frame (~8 fps).
+// Repaints cost the terminal real CPU at 30 fps, so a session paints every
+// 2nd frame (15 fps) while busy and every 4th (~8 fps) while idle, and skips
+// frames that look the same as the last one at the bars' resolution.
+const BUSY_EVERY = 2
 const IDLE_EVERY = 4
 
 const USAGE = '/fm toggles · /fm stop · /fm vol 40 · /fm status · /fm play <url>'
@@ -25,6 +28,7 @@ let isBusy = false
 let frames = 0
 let bars: Uint8Array = new Uint8Array(COLUMNS)
 let lastStatus = ''
+let lastCells = ''
 
 // The player's socket: the configured path, $CC_FM_SOCKET, or ~/.cc-fm/fm.sock.
 async function socketPath($: EngineInterface): Promise<string> {
@@ -49,9 +53,12 @@ async function setStatus($: EngineInterface, next: FmStatus) {
 
 function paint($: EngineInterface, frame: Uint8Array) {
   frames++
-  if (!site || (!isBusy && frames % IDLE_EVERY !== 0)) return
+  if (!site || frames % (isBusy ? BUSY_EVERY : IDLE_EVERY) !== 0) return
   bars = resample(frame, COLUMNS)
-  void $.ui.blit({ requestId: site, key: 'bars', cells: encodeCells(bars) })
+  const cells = encodeCells(bars)
+  if (cells === lastCells) return
+  lastCells = cells
+  void $.ui.blit({ requestId: site, key: 'bars', cells })
 }
 
 // Holds the stream open for the session's life, reconnecting while no

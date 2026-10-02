@@ -111,6 +111,10 @@ func (s *Server) Handler() http.Handler {
 		if !readJSON(w, r, &body) {
 			return
 		}
+		if err := player.CheckRemote(body.Source); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
 		s.anMu.Lock()
 		s.an.Reset()
 		s.anMu.Unlock()

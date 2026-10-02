@@ -90,7 +90,7 @@ Every Claude session on that server then shows the bars. Two things need to be t
 - `~/.cc-fm` exists.
 - sshd allows remote socket forwarding. That's the default, but some configs restrict it. To work, `AllowStreamLocalForwarding` must be `yes`, `all` or `remote`. Add `StreamLocalBindUnlink yes` too, so a reconnect can replace a stale socket.
 
-Socket forwarding keeps the player reachable only by your account. Don't expose it over TCP on a shared machine, because anyone who can reach the player can tell it what to play.
+Socket forwarding keeps the player reachable only by your account. Don't expose it over TCP on a shared machine: anyone who could reach the player could control it, and make it fetch any URL from your network.
 
 ## Usage
 
@@ -132,8 +132,9 @@ Useful `serve` flags:
 | claude.fm, the default | `https://clau.de/radio` |
 | Any YouTube video or stream | `https://www.youtube.com/watch?v=…` |
 | A direct stream URL | `https://example.com/stream.mp3` |
-| A local file, looped (full path) | `/Users/you/Music/track.ogg` |
 | A built-in synthetic track, for testing offline | `demo` |
+
+`/fm play` and `cc-fm play` accept only those. A request can come from a session on another machine, through the SSH forward, and a local path or ffmpeg graph would let it read, or with some filters write, files on the player's machine. To play a local file (looped) or an ffmpeg `lavfi:` graph, start the player with it: `cc-fm serve --autoplay /path/to/track.ogg`.
 
 ## Troubleshooting
 
