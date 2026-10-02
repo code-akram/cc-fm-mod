@@ -49,6 +49,8 @@ curl -fsSL https://raw.githubusercontent.com/code-akram/cc-fm-mod/main/install.s
 go install github.com/code-akram/cc-fm-mod/cmd/cc-fm@latest
 ```
 
+Homebrew 6 and later only load formulae from third-party taps that you trust. Installing by full name, as above, trusts this one formula. If Homebrew says it's ignoring formulae from `code-akram/tap`, for example after `brew tap code-akram/tap` and a plain `brew install cc-fm`, run `brew trust --formula code-akram/tap/cc-fm` and install again.
+
 With the install script or `go install`, also install `ffmpeg` and `yt-dlp` (`brew install ffmpeg yt-dlp`, or your package manager). To read the script before running it: `curl -fsSL https://raw.githubusercontent.com/code-akram/cc-fm-mod/main/install.sh | less`.
 
 Then:
