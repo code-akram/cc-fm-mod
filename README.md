@@ -2,7 +2,7 @@
 
 claude.fm in your Claude Code prompt. Audio plays on your machine, and a live spectrum runs in the hint row under the composer, whether Claude Code runs locally or on a server you SSH into.
 
-![cc-fm in Claude Code: live bars under the prompt, and /fm keys opening the controls](docs/demo.gif)
+![cc-fm in Claude Code: live bars under the prompt, /fm status on the rail, and the /fm keys controls lighting up with ctrl+x tab](docs/demo.gif)
 
 An unofficial community project. Not affiliated with or endorsed by Anthropic.
 
