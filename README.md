@@ -2,9 +2,7 @@
 
 claude.fm in your Claude Code prompt. Audio plays on your machine, and a live spectrum runs in the hint row under the composer, whether Claude Code runs locally or on a server you SSH into.
 
-```
-? for shortcuts                                            ♪ ▂▅█▃▁▃▄▆▅▄▃▂▃▄▃▂▂▃▂▂▁▂▁▁
-```
+![cc-fm in Claude Code: live bars under the prompt, and /fm keys opening the controls](docs/demo.gif)
 
 An unofficial community project. Not affiliated with or endorsed by Anthropic.
 
@@ -105,6 +103,7 @@ In Claude Code:
 | `/fm vol 40` or `/fm 40` | set the volume, 0–100 |
 | `/fm status` | what's playing, the volume and how many sessions are listening |
 | `/fm play <source>` | play something else |
+| `/fm keys` | show controls above the prompt: `ctrl+x tab` focuses them, then `p` play/stop, `j`/`k` volume, `x` close, `esc` back to the prompt |
 
 All of them work mid-turn.
 
@@ -140,7 +139,7 @@ Useful `serve` flags:
 
 ## Troubleshooting
 
-- **No bars.** Run `cc-fm doctor` on the player's machine. The mod stays out of the hint row until a player answers, and it retries every 3 seconds. The socket defaults to `~/.cc-fm/fm.sock`. Set `$CC_FM_SOCKET`, or the mod's `socket` option, to use another path.
+- **No bars.** Run `cc-fm doctor` on the player's machine. The mod stays out of the hint row until a player answers, and it retries every 3 seconds. The socket defaults to `~/.cc-fm/fm.sock`; set `$CC_FM_SOCKET` to use another path.
 - **`yt-dlp: Sign in to confirm you're not a bot`.** YouTube blocks many datacenter IPs. Run the player on your own machine, which is the intended setup anyway, or pass browser cookies with `--yt-dlp-args`.
 - **`remote port forwarding failed`.** See the sshd notes under step 3, or remove a stale `~/.cc-fm/fm.sock` on the server.
 - **Bars lag behind the sound over SSH.** Use `--delay-ms`.

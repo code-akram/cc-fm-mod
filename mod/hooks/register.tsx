@@ -5,6 +5,8 @@ import type { FmStatus } from '../types'
 import { encodeCells, parseLine, resample, splitLines } from './bars'
 
 const status = atom({ plugin: 'cc-fm-mod', key: 'status' } as const, { state: 'offline' } as FmStatus)
+// Whether the keyboard control row above the prompt is showing (/fm keys).
+const isKeysOpen = atom({ plugin: 'cc-fm-mod', key: 'isKeysOpen' } as const, false)
 
 const COLUMNS = 24
 // Below this width the hint row keeps all its room for the engine's own line.
@@ -15,12 +17,16 @@ const RETRY_MS = 3000
 // frames that look the same as the last one at the bars' resolution.
 const BUSY_EVERY = 2
 const IDLE_EVERY = 4
+// Frames between checks that the session's state still holds the status.
+const RESYNC_EVERY = 60
 
-const USAGE = '/fm toggles · /fm stop · /fm vol 40 · /fm status · /fm play <url>'
+// Volume change per press of a control-row key.
+const VOLUME_STEP = 5
+
+const USAGE = '/fm toggles · /fm stop · /fm vol 40 · /fm status · /fm keys · /fm play <url>'
 
 class Offline extends Error {}
 
-let configuredSocket = ''
 let socket: string | undefined
 // The hint row's requestId while it shows our bars, for blitting into.
 let site: string | undefined
@@ -28,31 +34,41 @@ let isBusy = false
 let frames = 0
 let bars: Uint8Array = new Uint8Array(COLUMNS)
 let lastStatus = ''
+// The player's latest status, kept to restore after a /clear resets state.
+let known: FmStatus = { state: 'offline' }
 let lastCells = ''
 
-// The player's socket: the configured path, $CC_FM_SOCKET, or ~/.cc-fm/fm.sock.
+// The player's socket: $CC_FM_SOCKET, or ~/.cc-fm/fm.sock.
 async function socketPath($: EngineInterface): Promise<string> {
   if (socket) return socket
   const { stdout } = await $.process.run([
     'sh',
     '-c',
-    'p=${1:-${CC_FM_SOCKET:-$HOME/.cc-fm/fm.sock}}; case $p in "~/"*) p=$HOME/${p#"~/"};; esac; printf %s "$p"',
-    'sh',
-    configuredSocket,
+    'p=${CC_FM_SOCKET:-$HOME/.cc-fm/fm.sock}; case $p in "~/"*) p=$HOME/${p#"~/"};; esac; printf %s "$p"',
   ])
   socket = stdout
   return socket
 }
 
 async function setStatus($: EngineInterface, next: FmStatus) {
+  known = next
   const json = JSON.stringify(next)
   if (json === lastStatus) return
   lastStatus = json
   await update($, status, () => next)
 }
 
+// A /clear starts a new session whose state starts over, and no event says
+// so; the player only reports changes. While bars flow, check now and then.
+async function resync($: EngineInterface) {
+  if (JSON.stringify(await read($, status)) !== lastStatus) {
+    await update($, status, () => known)
+  }
+}
+
 function paint($: EngineInterface, frame: Uint8Array) {
   frames++
+  if (frames % RESYNC_EVERY === 0) void resync($)
   if (!site || frames % (isBusy ? BUSY_EVERY : IDLE_EVERY) !== 0) return
   bars = resample(frame, COLUMNS)
   const cells = encodeCells(bars)
@@ -100,6 +116,15 @@ async function api($: EngineInterface, method: 'GET' | 'POST', path: string, bod
   }
 }
 
+// A control-row press: send it, and show the player's answer at once.
+async function control($: EngineInterface, method: 'GET' | 'POST', path: string, body?: object) {
+  try {
+    await setStatus($, await api($, method, path, body))
+  } catch (err) {
+    $.ui.toast(err instanceof Offline ? 'No cc-fm player answers.' : `cc-fm: ${String(err)}`)
+  }
+}
+
 function describe(st: FmStatus): string {
   const parts = [`♪ claude.fm · ${st.state}`]
   if (st.volume !== undefined) parts.push(`vol ${st.volume}`)
@@ -120,8 +145,7 @@ async function offlineHelp($: EngineInterface): Promise<string> {
   ].join('\n')
 }
 
-export const register: Register = (on, options) => {
-  configuredSocket = String(options.socket ?? '').trim()
+export const register: Register = on => {
   socket = undefined
 
   on('session.start', async ($, e, next) => {
@@ -155,6 +179,14 @@ export const register: Register = (on, options) => {
         const volume = Number(/^\d+$/.test(word) ? word : rest[0])
         if (!Number.isInteger(volume) || volume < 0 || volume > 100) return { text: 'Volume is 0–100: /fm vol 40' }
         st = await api($, 'POST', '/v1/volume', { volume })
+      } else if (word === 'keys') {
+        const isOpen = !(await read($, isKeysOpen))
+        await update($, isKeysOpen, () => isOpen)
+        return {
+          text: isOpen
+            ? 'Controls are above the prompt: ctrl+x tab to focus them, then p play/stop · j/k volume · x close · esc back.'
+            : 'Controls closed.',
+        }
       } else if (word === 'status') {
         st = await api($, 'GET', '/v1/status')
       } else {
@@ -166,6 +198,48 @@ export const register: Register = (on, options) => {
       if (err instanceof Offline) return { text: await offlineHelp($) }
       return { text: `cc-fm: ${err instanceof Error ? err.message : String(err)}` }
     }
+  })
+
+  // The control row above the prompt, shown by /fm keys: hotkeys work once
+  // ctrl+x tab focuses it, and each one is a clickable button too.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const st = await read($, status)
+    if (!(await read($, isKeysOpen)) || e.props.hasSurvey || st.state === 'offline') {
+      return next(e)
+    }
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const isOn = st.state === 'playing' || st.state === 'connecting' || st.state === 'retrying'
+    const volume = st.volume ?? 0
+
+    return (
+      <Box flexDirection="row" gap={2}>
+        <Text dimColor>♪ claude.fm</Text>
+        <Button
+          key="toggle"
+          hotkey="p"
+          plain
+          label={isOn ? 'stop' : 'play'}
+          onPress={() => control($, 'POST', isOn ? '/v1/stop' : '/v1/play')}
+        />
+        <Button
+          key="down"
+          hotkey="j"
+          plain
+          label="vol −"
+          onPress={() => control($, 'POST', '/v1/volume', { volume: Math.max(0, volume - VOLUME_STEP) })}
+        />
+        <Text>{volume}</Text>
+        <Button
+          key="up"
+          hotkey="k"
+          plain
+          label="vol +"
+          onPress={() => control($, 'POST', '/v1/volume', { volume: Math.min(100, volume + VOLUME_STEP) })}
+        />
+        <Button key="close" hotkey="x" plain label="close" onPress={() => update($, isKeysOpen, () => false)} />
+        <Text dimColor>ctrl+x tab · esc</Text>
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {

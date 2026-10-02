@@ -12,6 +12,6 @@ export type FmStatus = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'cc-fm-mod': { status: FmStatus }
+    'cc-fm-mod': { status: FmStatus; isKeysOpen: boolean }
   }
 }
