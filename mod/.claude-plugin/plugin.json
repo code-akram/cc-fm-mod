@@ -1,6 +1,6 @@
 {
   "name": "cc-fm-mod",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "claude.fm in your prompt: a live spectrum under the composer and /fm to control the cc-fm player, local or over SSH",
   "author": { "name": "Akram", "url": "https://github.com/code-akram" },
   "homepage": "https://github.com/code-akram/cc-fm-mod",

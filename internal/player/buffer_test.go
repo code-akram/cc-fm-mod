@@ -82,13 +82,3 @@ func TestBufferRebuffersAfterLongStall(t *testing.T) {
 		t.Fatalf("played %v, want all 3.5s, nothing dropped", played)
 	}
 }
-
-func TestURLInputStartsBehindLiveEdge(t *testing.T) {
-	args := urlInput("https://manifest.googlevideo.com/api/manifest/hls_playlist/expire/1/index.m3u8")
-	if !strings.Contains(strings.Join(args, " "), "-live_start_index -6") {
-		t.Fatalf("args = %q, want -live_start_index -6", args)
-	}
-	if strings.Contains(strings.Join(urlInput("https://example.com/a.mp3"), " "), "live_start_index") {
-		t.Fatal("a plain URL got an HLS-only option")
-	}
-}

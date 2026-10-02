@@ -31,10 +31,11 @@ func TestCheckRemote(t *testing.T) {
 }
 
 func TestURLInputsAreNetworkOnly(t *testing.T) {
-	args, _, err := resolve(context.Background(), "https://example.com/stream.mp3", nil)
+	in, err := resolve(context.Background(), "https://example.com/stream.mp3", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	args := in.args
 	i := slices.Index(args, "-protocol_whitelist")
 	if i < 0 || i+1 >= len(args) || slices.Contains([]string{"file", "concat"}, args[i+1]) {
 		t.Fatalf("args = %q, want a network-only protocol whitelist", args)

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -33,6 +34,13 @@ const (
 	playRate   = 48000
 	frameBytes = 4
 )
+
+// hlsClient fetches live HLS: several segments at once from one host, and a
+// bound on each request so a hung one is retried rather than waited on.
+var hlsClient = &http.Client{
+	Timeout:   20 * time.Second,
+	Transport: &http.Transport{MaxIdleConnsPerHost: 8, IdleConnTimeout: time.Minute},
+}
 
 // The visualizer tap halves the rate; the analyzer must expect exactly that.
 const _ = uint(playRate/2-spectrum.SampleRate) + uint(spectrum.SampleRate-playRate/2)
@@ -178,12 +186,12 @@ func (p *Player) run(ctx context.Context, source string) {
 }
 
 func (p *Player) once(ctx context.Context, source string) error {
-	input, title, err := resolve(ctx, source, p.cfg.YtDlpArgs)
+	in, err := resolve(ctx, source, p.cfg.YtDlpArgs)
 	if err != nil {
 		return err
 	}
 	p.mu.Lock()
-	p.st.Title = title
+	p.st.Title = in.title
 	p.mu.Unlock()
 
 	// Either process ending takes the other down with it.
@@ -193,13 +201,31 @@ func (p *Player) once(ctx context.Context, source string) error {
 	sinkArgs := speakerArgs(p.cfg.Output)
 	// Only a sound card paces the stream; without one, read at the native rate.
 	isUnpaced := sinkArgs == nil || strings.HasPrefix(p.cfg.Output, "file:")
-	decoder, decoderErr := p.ffmpeg(ctx, decoderArgs(input, isUnpaced))
+	decoder, decoderErr := p.ffmpeg(ctx, decoderArgs(in.args, isUnpaced))
 	decoded, err := decoder.StdoutPipe()
 	if err != nil {
 		return err
 	}
+	var feed io.WriteCloser
+	if in.live != "" {
+		if feed, err = decoder.StdinPipe(); err != nil {
+			return err
+		}
+	}
 	if err := decoder.Start(); err != nil {
 		return fmt.Errorf("ffmpeg: %w", err)
+	}
+
+	// A live HLS stream is fetched here, several segments at a time, and fed
+	// to the decoder; when it fails, the decoder runs out and the stream ends.
+	fetched := make(chan error, 1)
+	if feed != nil {
+		hls := &liveHLS{client: hlsClient, playlist: in.live, inFlight: 4, behind: 6, log: p.logf}
+		go func() {
+			err := hls.run(ctx, feed)
+			feed.Close()
+			fetched <- err
+		}()
 	}
 
 	var speaker *exec.Cmd
@@ -240,7 +266,16 @@ func (p *Player) once(ctx context.Context, source string) error {
 		speakerExit = speaker.Wait()
 	}
 
+	var fetchErr error
+	if feed != nil {
+		if fetchErr = <-fetched; ctx.Err() != nil && errors.Is(fetchErr, context.Canceled) {
+			fetchErr = nil
+		}
+	}
+
 	switch {
+	case fetchErr != nil:
+		return fetchErr
 	case decodeExit != nil && decoderErr.Last() != "":
 		return errors.New(decoderErr.Last())
 	case speakerExit != nil && speakerErr.Last() != "":
@@ -362,8 +397,13 @@ const (
 	// prefill is queued before playback starts.
 	prefill = 2 * time.Second
 	// rebuffer is queued again after a stall before playback resumes: one
-	// clean pause rather than a stutter of dropouts.
-	rebuffer = time.Second
+	// clean pause rather than a stutter of dropouts. Each stall soon after
+	// another doubles it, up to maxRebuffer, so a struggling stream pauses
+	// less often for longer instead of stuttering.
+	rebuffer    = time.Second
+	maxRebuffer = 8 * time.Second
+	// stallMemory is how long a stall counts toward the next one's rebuffer.
+	stallMemory = time.Minute
 	// chunkBytes is about 85 ms of audio.
 	chunkBytes = 16384
 )
@@ -420,6 +460,8 @@ func (p *Player) bufferedPump(ctx context.Context, r io.Reader, w io.Writer) {
 	}
 	p.setState(Playing, "")
 	current := p.gain()
+	level := rebuffer
+	var lastStall time.Time
 	for {
 		var chunk []byte
 		select {
@@ -431,11 +473,17 @@ func (p *Player) bufferedPump(ctx context.Context, r io.Reader, w io.Writer) {
 		default:
 			// Nothing queued: the stream stalled for longer than the buffer.
 			stalled := time.Now()
-			if !fill(chunksFor(rebuffer)) {
+			if !lastStall.IsZero() && stalled.Sub(lastStall) < stallMemory {
+				level = min(level*2, maxRebuffer)
+			} else {
+				level = rebuffer
+			}
+			lastStall = stalled
+			if !fill(chunksFor(level)) {
 				return
 			}
-			p.logf("underrun: the stream stalled, so playback paused %v to rebuffer",
-				time.Since(stalled).Round(time.Millisecond))
+			p.logf("underrun: the stream stalled, so playback paused %v to rebuffer %v",
+				time.Since(stalled).Round(time.Millisecond), level)
 			continue
 		}
 
@@ -484,12 +532,12 @@ func scale(s int, g float64) int16 {
 
 // decoderArgs turns the input into the fixed PCM format on stdout, reading
 // the input at its native rate when nothing downstream sets the pace.
-func decoderArgs(input []string, isUnpaced bool) []string {
+func decoderArgs(in []string, isUnpaced bool) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning", "-nostats", "-nostdin"}
 	if isUnpaced {
 		args = append(args, "-re")
 	}
-	args = append(args, input...)
+	args = append(args, in...)
 	return append(args, "-vn", "-ac", "2", "-ar", fmt.Sprint(playRate), "-f", "s16le", "pipe:1")
 }
 

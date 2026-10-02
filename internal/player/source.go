@@ -12,36 +12,45 @@ import (
 	"strings"
 )
 
-// resolve turns a source into ffmpeg input arguments and a title.
+// input is how ffmpeg reads a source.
+type input struct {
+	args  []string
+	title string
+	// live, when set, is a live HLS media playlist the player fetches itself,
+	// feeding the segments to ffmpeg on stdin (args then read pipe:0).
+	live string
+}
+
+// resolve turns a source into an input.
 //
 //	demo               a built-in synthetic track, no network needed
 //	lavfi:<graph>      any ffmpeg-generated signal
 //	/path/to/file      a local file, looped
-//	YouTube, clau.de   resolved to a direct stream by yt-dlp
+//	YouTube, clau.de   resolved by yt-dlp; a live stream is fetched by the player
 //	any other URL      handed to ffmpeg as is
-func resolve(ctx context.Context, source string, ytDlpArgs []string) ([]string, string, error) {
+func resolve(ctx context.Context, source string, ytDlpArgs []string) (input, error) {
 	if source == "demo" {
-		return []string{"-f", "lavfi", "-i", demoGraph}, "demo signal", nil
+		return input{args: []string{"-f", "lavfi", "-i", demoGraph}, title: "demo signal"}, nil
 	}
 	if graph, ok := strings.CutPrefix(source, "lavfi:"); ok {
-		return []string{"-f", "lavfi", "-i", graph}, "test signal", nil
+		return input{args: []string{"-f", "lavfi", "-i", graph}, title: "test signal"}, nil
 	}
 
 	u, err := url.Parse(source)
 	if err != nil || u.Scheme == "" {
 		if _, err := os.Stat(source); err != nil {
-			return nil, "", err
+			return input{}, err
 		}
-		return []string{"-stream_loop", "-1", "-i", source}, filepath.Base(source), nil
+		return input{args: []string{"-stream_loop", "-1", "-i", source}, title: filepath.Base(source)}, nil
 	}
 
 	if !needsYtDlp(u.Hostname()) {
-		return urlInput(source), source, nil
+		return input{args: append(networkOnly(), "-i", source), title: source}, nil
 	}
 
 	yt, err := YtDlpPath()
 	if err != nil {
-		return nil, "", err
+		return input{}, err
 	}
 	args := append(append([]string{}, ytDlpArgs...),
 		"--no-warnings", "--no-playlist", "-f", "bestaudio/best",
@@ -50,27 +59,25 @@ func resolve(ctx context.Context, source string, ytDlpArgs []string) ([]string, 
 	if err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
-			return nil, "", fmt.Errorf("yt-dlp: %s", lastLine(string(exit.Stderr)))
+			return input{}, fmt.Errorf("yt-dlp: %s", lastLine(string(exit.Stderr)))
 		}
-		return nil, "", fmt.Errorf("yt-dlp: %w", err)
+		return input{}, fmt.Errorf("yt-dlp: %w", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	if len(lines) < 2 {
-		return nil, "", errors.New("yt-dlp printed no stream URL")
+		return input{}, errors.New("yt-dlp printed no stream URL")
 	}
+	title, stream := strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1])
 
-	return urlInput(strings.TrimSpace(lines[1])), strings.TrimSpace(lines[0]), nil
+	if isHLS(stream) {
+		return input{args: []string{"-i", "pipe:0"}, title: title, live: stream}, nil
+	}
+	return input{args: append(networkOnly(), "-i", stream), title: title}, nil
 }
 
-// urlInput is ffmpeg's input for a URL: network protocols only and, for a
-// live HLS playlist, a start far enough behind the newest segment that the
-// player's read-ahead buffer has segments to fill from.
-func urlInput(u string) []string {
-	args := networkOnly()
-	if strings.Contains(u, ".m3u8") || strings.Contains(u, "/hls_playlist/") {
-		args = append(args, "-live_start_index", "-6")
-	}
-	return append(args, "-i", u)
+// isHLS says whether a stream URL is an HLS playlist.
+func isHLS(u string) bool {
+	return strings.Contains(u, ".m3u8") || strings.Contains(u, "/hls_playlist/")
 }
 
 // networkOnly keeps ffmpeg to network protocols for a URL, so a playlist
