@@ -1,0 +1,47 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check the tag matches the mod's version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          for f in mod/.claude-plugin/plugin.json .claude-plugin/marketplace.json; do
+            v=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$f")
+            if [ "$tag" != "$v" ]; then
+              echo "::error::tag v$tag doesn't match $f version $v"
+              exit 1
+            fi
+          done
+
+      - run: go vet ./... && go test ./...
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update the Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+        run: scripts/update-tap.sh "${GITHUB_REF_NAME#v}" dist/checksums.txt

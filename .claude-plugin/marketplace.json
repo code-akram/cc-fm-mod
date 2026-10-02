@@ -1,0 +1,15 @@
+{
+  "name": "cc-fm",
+  "owner": { "name": "Akram Ahmed", "url": "https://github.com/code-akram" },
+  "metadata": {
+    "description": "claude.fm in your Claude Code prompt"
+  },
+  "plugins": [
+    {
+      "name": "cc-fm-mod",
+      "source": "./mod",
+      "description": "A live claude.fm spectrum under the composer and /fm to control the cc-fm player, local or over SSH",
+      "version": "0.0.1"
+    }
+  ]
+}

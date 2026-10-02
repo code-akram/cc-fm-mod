@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -26,8 +27,18 @@ import (
 	"github.com/code-akram/cc-fm-mod/internal/server"
 )
 
-// version is set at release time with -ldflags "-X main.version=...".
+// version is set at release time with -ldflags "-X main.version=..."; a
+// `go install …@vX.Y.Z` build reads it from the module instead.
 var version = "dev"
+
+func init() {
+	if version != "dev" {
+		return
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && strings.HasPrefix(info.Main.Version, "v") {
+		version = strings.TrimPrefix(info.Main.Version, "v")
+	}
+}
 
 const usage = `cc-fm — claude.fm for Claude Code
 

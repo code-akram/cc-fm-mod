@@ -29,30 +29,45 @@ Audio never crosses the network. Only the bar heights do, at under 1 KB/s. Every
 ## Requirements
 
 - Claude Code 2.1.287 or later, the first release with mods
-- On the machine with speakers: macOS or Linux, plus `ffmpeg` and `yt-dlp`
+- On the machine with speakers: macOS or Linux, plus `ffmpeg` and `yt-dlp` (Homebrew installs them for you)
 - On the machine running Claude Code: `curl`, which macOS and Linux already have
 
 ## Setup
 
-### 1. Install and run the player on your machine
+### 1. Install the player on your machine
+
+Pick one:
 
 ```sh
-brew install ffmpeg yt-dlp          # or your package manager
+# Homebrew (macOS, Linux): pulls in ffmpeg and yt-dlp too
+brew install code-akram/tap/cc-fm
+
+# Install script: a prebuilt binary to ~/.local/bin, checksum-verified
+curl -fsSL https://raw.githubusercontent.com/code-akram/cc-fm-mod/main/install.sh | sh
+
+# From source
 go install github.com/code-akram/cc-fm-mod/cmd/cc-fm@latest
+```
+
+With the install script or `go install`, also install `ffmpeg` and `yt-dlp` (`brew install ffmpeg yt-dlp`, or your package manager). To read the script before running it: `curl -fsSL https://raw.githubusercontent.com/code-akram/cc-fm-mod/main/install.sh | less`.
+
+Then:
+
+```sh
 cc-fm doctor                        # checks ffmpeg, yt-dlp and the audio device
 cc-fm serve --autoplay default      # starts claude.fm
 ```
 
-Prebuilt binaries, a Homebrew tap and an install script are planned. Until then, `go install` is the way in.
+With Homebrew, `brew services start cc-fm` keeps the player running at login instead. It stays silent until you start it with `/fm`.
 
-### 2. Load the mod into Claude Code
+### 2. Install the mod in Claude Code
 
-```sh
-git clone https://github.com/code-akram/cc-fm-mod
-claude --plugin-dir ./cc-fm-mod/mod
+```
+/plugin marketplace add code-akram/cc-fm-mod
+/plugin install cc-fm-mod@cc-fm
 ```
 
-`♪` and the bars appear at the right of the hint row while something is playing.
+`♪` and the bars appear at the right of the hint row while something is playing. To hack on the mod instead, clone the repo and run `claude --plugin-dir ./cc-fm-mod/mod`.
 
 ### 3. Optional: Claude Code on a remote machine
 
