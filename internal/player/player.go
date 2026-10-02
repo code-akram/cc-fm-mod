@@ -72,8 +72,12 @@ type Config struct {
 	OnChange func(Status)
 	// OnVolume receives each volume set, to keep it for the next run.
 	OnVolume func(int)
-	// Log receives ffmpeg's warnings, a line at a time; nil drops them.
+	// Log receives ffmpeg's warnings and the player's own, a line at a time;
+	// nil drops them.
 	Log func(string)
+	// Record, when set, receives the visualizer's copy of what plays: 24 kHz
+	// mono s16le, before the volume. For tracking down audio glitches.
+	Record io.Writer
 }
 
 type Player struct {
@@ -247,7 +251,10 @@ func (p *Player) ffmpeg(ctx context.Context, args []string) (*exec.Cmd, *tail) {
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = 3 * time.Second
-	stderr := &tail{max: 2048, log: p.cfg.Log}
+	stderr := &tail{max: 2048}
+	if p.cfg.Log != nil {
+		stderr.log = func(line string) { p.cfg.Log("ffmpeg: " + line) }
+	}
 	cmd.Stderr = stderr
 	return cmd, stderr
 }
@@ -259,6 +266,9 @@ func (p *Player) pump(r io.Reader, w io.Writer) {
 	var carry []byte
 	current := p.gain()
 	isFirst := true
+	// The speakers play in real time, so audio handed over minus time passed
+	// is what they have queued. Below zero they ran dry: an audible dropout.
+	var queue starvation
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
@@ -275,7 +285,14 @@ func (p *Player) pump(r io.Reader, w io.Writer) {
 			carry = append(carry[:0], data[whole:]...)
 			if isFirst {
 				isFirst = false
+				queue.start(time.Now(), time.Duration(p.cfg.DelayMs)*time.Millisecond)
 				p.setState(Playing, "")
+			}
+			if dry := queue.add(time.Now(), whole/frameBytes); dry > 0 {
+				p.logf("underrun: the stream fell %v behind, so the speakers ran dry", dry.Round(time.Millisecond))
+			}
+			if p.cfg.Record != nil {
+				_ = binary.Write(p.cfg.Record, binary.LittleEndian, mono)
 			}
 			if p.cfg.OnSamples != nil {
 				p.cfg.OnSamples(mono)
@@ -284,6 +301,51 @@ func (p *Player) pump(r io.Reader, w io.Writer) {
 		if err != nil {
 			return
 		}
+	}
+}
+
+// starvation tracks how much audio the speakers have queued, from what was
+// handed over and how long it has been, and reports when they ran dry: once
+// per dropout, arming again only after the queue has rebuilt.
+type starvation struct {
+	since      time.Time
+	produced   time.Duration
+	isDisarmed bool
+}
+
+func (q *starvation) start(now time.Time, ahead time.Duration) {
+	q.since, q.produced = now, ahead
+}
+
+// add counts frames handed over at now and returns how long the speakers
+// went without, if they just did; it then starts counting afresh, as the
+// speakers pick up again from silence.
+func (q *starvation) add(now time.Time, frames int) time.Duration {
+	queued := q.produced - now.Sub(q.since)
+	q.produced += time.Duration(frames) * time.Second / playRate
+	if queued >= -underrunSlack {
+		if queued >= rearmQueue {
+			q.isDisarmed = false
+		}
+		return 0
+	}
+	q.since, q.produced = now, time.Duration(frames)*time.Second/playRate
+	if q.isDisarmed {
+		return 0
+	}
+	q.isDisarmed = true
+	return -queued
+}
+
+// rearmQueue is how much must be queued again before another dropout counts.
+const rearmQueue = 100 * time.Millisecond
+
+// underrunSlack absorbs scheduling jitter in the bookkeeping itself.
+const underrunSlack = 20 * time.Millisecond
+
+func (p *Player) logf(format string, args ...any) {
+	if p.cfg.Log != nil {
+		p.cfg.Log(fmt.Sprintf(format, args...))
 	}
 }
 

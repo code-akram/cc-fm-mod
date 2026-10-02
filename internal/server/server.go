@@ -57,7 +57,8 @@ func New(cfg player.Config, bands int, version string) *Server {
 		s.an.Push(samples)
 		s.anMu.Unlock()
 	}
-	var last player.Status
+	// The player starts stopped; only changes from there are worth a line.
+	last := player.Status{State: player.Stopped}
 	cfg.OnChange = func(st player.Status) {
 		if st.State != last.State || st.Error != last.Error {
 			log.Printf("%s %s%s", st.State, st.Title, prefixed(" · ", st.Error))

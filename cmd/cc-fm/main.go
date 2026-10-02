@@ -109,6 +109,7 @@ func serve(args []string) error {
 	bands := fs.Int("bands", 32, "bars per frame")
 	autoplay := fs.String("autoplay", "", `start playing this source at once ("default" for claude.fm)`)
 	ytArgs := fs.String("yt-dlp-args", "", `extra yt-dlp arguments, e.g. "--cookies-from-browser firefox"`)
+	record := fs.String("record", "", "debugging: also write what plays to this file, as 24 kHz mono s16le")
 	_ = fs.Parse(args)
 
 	// The last volume set wins over the default, but not over --volume.
@@ -129,14 +130,25 @@ func serve(args []string) error {
 	}
 	defer removeIfOurs(*sock)
 
-	log.SetFlags(log.Ldate | log.Ltime)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 	log.SetPrefix("cc-fm: ")
+	var recording io.Writer
+	if *record != "" {
+		f, err := os.Create(*record)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		recording = f
+		log.Printf("recording what plays to %s (24 kHz mono s16le) from the first sample on", *record)
+	}
 	srv := server.New(player.Config{
 		Output:    *output,
 		Volume:    *volume,
 		DelayMs:   *delay,
 		YtDlpArgs: strings.Fields(*ytArgs),
-		Log:       func(line string) { log.Print("ffmpeg: ", line) },
+		Log:       func(line string) { log.Print(line) },
+		Record:    recording,
 		OnVolume: func(v int) {
 			if err := saveState(state{Volume: &v}); err != nil {
 				log.Print("saving the volume: ", err)
