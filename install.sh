@@ -70,3 +70,4 @@ if [ -n "$missing" ]; then
 fi
 
 echo "Next: cc-fm doctor, then cc-fm serve --autoplay default"
+echo "To keep it running at login: cc-fm service install"

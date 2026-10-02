@@ -58,7 +58,12 @@ cc-fm doctor                        # checks ffmpeg, yt-dlp and the audio device
 cc-fm serve --autoplay default      # starts claude.fm
 ```
 
-With Homebrew, `brew services start cc-fm` keeps the player running at login instead. It stays silent until you start it with `/fm`.
+To keep the player running at login instead, so it's always there for `/fm`:
+
+- **Homebrew:** `brew services start cc-fm`
+- **Install script or `go install`:** `cc-fm service install`. That writes a launchd agent on macOS or a systemd user unit on Linux, restarts the player if it ever exits, and `cc-fm service uninstall` undoes it. Pass flags for `serve` after `--`, for example `cc-fm service install -- --volume 40`, and add `--dry-run` to see what it would write first.
+
+Either way the player starts silent and waits for `/fm`.
 
 ### 2. Install the mod in Claude Code
 
@@ -118,6 +123,8 @@ cc-fm vol <0-100>        set the volume
 cc-fm status             print the player's status as JSON
 cc-fm watch              draw the bars in this terminal
 cc-fm doctor             check ffmpeg, yt-dlp and the audio device
+cc-fm service install    run the player at login (launchd or systemd)
+cc-fm service uninstall  stop running it at login
 ```
 
 Useful `serve` flags:

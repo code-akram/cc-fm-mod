@@ -51,6 +51,9 @@ usage:
   cc-fm status             print the player's status as JSON
   cc-fm watch              draw the bars in this terminal
   cc-fm doctor             check ffmpeg, yt-dlp and the audio device
+  cc-fm service install    run the player at login (launchd or systemd; -- serve flags)
+  cc-fm service uninstall  stop running it at login
+  cc-fm service status     whether it's installed and running
   cc-fm version
 
 The socket is $CC_FM_SOCKET, or ~/.cc-fm/fm.sock. Run "cc-fm serve -h" for its flags.
@@ -85,6 +88,8 @@ func main() {
 		err = watch()
 	case "doctor":
 		err = doctor()
+	case "service":
+		err = service(args)
 	case "version", "--version", "-v":
 		fmt.Println("cc-fm", version)
 	case "help", "-h", "--help":
