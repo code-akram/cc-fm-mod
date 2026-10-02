@@ -3,14 +3,13 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { FmStatus } from '../types'
 import { encodeCells, parseLine, resample, splitLines } from './bars'
+import { RED, VIOLET, keyHint, listening, meter, railed, stateItem } from './views'
 
 const status = atom({ plugin: 'cc-fm-mod', key: 'status' } as const, { state: 'offline' } as FmStatus)
-// Whether the keyboard control row above the prompt is showing (/fm keys).
-const isKeysOpen = atom({ plugin: 'cc-fm-mod', key: 'isKeysOpen' } as const, false)
 
 const COLUMNS = 24
 // Below this width the hint row keeps all its room for the engine's own line.
-const MIN_VIEWPORT = 72
+const MIN_VIEWPORT = 60
 const RETRY_MS = 3000
 // Repaints cost the terminal real CPU at 30 fps, so a session paints every
 // 2nd frame (15 fps) while busy and every 4th (~8 fps) while idle, and skips
@@ -22,17 +21,29 @@ const RESYNC_EVERY = 60
 
 // Volume change per press of j or k in the controls.
 const VOLUME_STEP = 5
-// Rows the controls need for their full, railed layout, and for the spaced
-// three-line one; with less they take one line.
-const RAIL_ROWS = 9
-const SPACIOUS_ROWS = 5
-// Cells in the controls' volume meter.
-const METER_CELLS = 16
-const CORAL = '#d97757'
-const AMBER = '#e0af68'
-const STEEL = '#7aa2f7'
+// The controls pane /fm keys opens, and the room its rail needs.
+const PANE = 'cc-fm'
+const PANE_ROWS = 10
+const PANE_COLUMNS = 54
 
-const USAGE = '/fm toggles · /fm stop · /fm vol 40 · /fm status · /fm keys · /fm play <url>'
+// What /fm takes, for its typeahead line and its usage reply.
+const COMMANDS: [string, string][] = [
+  ['/fm', 'play or stop'],
+  ['/fm vol <0-100>', 'set the volume'],
+  ['/fm status', 'what’s playing'],
+  ['/fm play <url>', 'play a stream or a video'],
+  ['/fm keys', 'controls you drive from the keyboard'],
+]
+
+// What a /fm reply showed, so its transcript row can draw it on the rail.
+// Keyed by the reply's text, which is also what the model reads.
+type Reply =
+  | { kind: 'status'; st: FmStatus }
+  | { kind: 'volume'; st: FmStatus }
+  | { kind: 'usage' }
+  | { kind: 'offline'; socket: string }
+  | { kind: 'error'; message: string }
+const replies = new Map<string, Reply>()
 
 class Offline extends Error {}
 
@@ -134,24 +145,40 @@ async function control($: EngineInterface, method: 'GET' | 'POST', path: string,
   }
 }
 
-function describe(st: FmStatus): string {
-  const parts = [`♪ claude.fm · ${st.state}`]
-  if (st.volume !== undefined) parts.push(`vol ${st.volume}`)
-  if (st.listeners) parts.push(`${st.listeners} session${st.listeners === 1 ? '' : 's'} listening`)
-  if (st.output === 'null') parts.push('no speakers on the player’s machine, bars only')
-  let text = parts.join(' · ')
-  if (st.title) text += `\n  ${st.title}`
-  if (st.error) text += `\n  ${st.error}`
-  return text
+// The marker for control and command items on the rail.
+const VIOLET_ITEM = VIOLET
+
+// Whether a /fm argument is one it knows, rather than a typo for usage.
+function isCommandWord(word: string, verb: string): boolean {
+  return (
+    ['toggle', 'stop', 'off', 'play', 'on', 'vol', 'volume', 'status', 'keys', 'help'].includes(word) ||
+    /^\d+$/.test(word) ||
+    verb.includes('://')
+  )
 }
 
-async function offlineHelp($: EngineInterface): Promise<string> {
-  const path = await socketPath($)
-  return [
-    `No cc-fm player answers on ${path}.`,
-    'Start one on the machine with your speakers: cc-fm serve',
-    `Working over SSH? Forward it in ~/.ssh/config: RemoteForward ${path} <your ~>/.cc-fm/fm.sock`,
-  ].join('\n')
+// Records how a reply draws and returns it, its text a plain version.
+function reply(r: Reply): { text: string } {
+  const text = plainText(r)
+  replies.set(text, r)
+  return { text }
+}
+
+function plainText(r: Reply): string {
+  switch (r.kind) {
+    case 'status':
+      return [`claude.fm: ${r.st.state}`, `vol ${r.st.volume ?? 0}`, listening(r.st), r.st.title, r.st.error]
+        .filter(Boolean)
+        .join(' · ')
+    case 'volume':
+      return `claude.fm: volume ${r.st.volume ?? 0}`
+    case 'usage':
+      return COMMANDS.map(([cmd, what]) => `${cmd}: ${what}`).join(' · ')
+    case 'offline':
+      return `claude.fm: no cc-fm player answers on ${r.socket}. Start one where your speakers are: cc-fm serve`
+    case 'error':
+      return `claude.fm: ${r.message}`
+  }
 }
 
 export const register: Register = on => {
@@ -161,8 +188,8 @@ export const register: Register = on => {
     const started = await next(e)
     await $.command.register({
       name: 'fm',
-      description: `claude.fm: ${USAGE}`,
-      argumentHint: '[stop | vol <0-100> | status | play <url>]',
+      description: 'claude.fm in your prompt: play, stop, volume and controls',
+      argumentHint: '[stop | vol <0-100> | status | keys | play <url> | help]',
       immediate: true,
     })
     void listen($)
@@ -173,8 +200,18 @@ export const register: Register = on => {
     const [verb = '', ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
     const word = verb.toLowerCase()
     try {
+      if (word === 'keys') {
+        // Opened by the person's command, the pane takes the keyboard at once:
+        // no chord to learn, and esc closes it.
+        await $.ui.open({ id: PANE, title: 'claude.fm', focus: true, closeOnEscape: true, rows: PANE_ROWS, columns: PANE_COLUMNS })
+        return {}
+      }
+      if (word === 'help' || (word !== '' && !isCommandWord(word, verb))) {
+        return reply({ kind: 'usage' })
+      }
+
       let st: FmStatus
-      if (word === '') {
+      if (word === '' || word === 'toggle') {
         const now = await api($, 'GET', '/v1/status')
         const isOn = now.state === 'playing' || now.state === 'connecting' || now.state === 'retrying'
         st = await api($, 'POST', isOn ? '/v1/stop' : '/v1/play')
@@ -182,188 +219,122 @@ export const register: Register = on => {
         st = await api($, 'POST', '/v1/stop')
       } else if (word === 'play' || word === 'on') {
         st = await api($, 'POST', '/v1/play', { source: rest.join(' ') })
-      } else if (verb.includes('://') || verb.startsWith('lavfi:')) {
+      } else if (verb.includes('://')) {
         st = await api($, 'POST', '/v1/play', { source: [verb, ...rest].join(' ') })
       } else if (word === 'vol' || word === 'volume' || /^\d+$/.test(word)) {
         const volume = Number(/^\d+$/.test(word) ? word : rest[0])
-        if (!Number.isInteger(volume) || volume < 0 || volume > 100) return { text: 'Volume is 0–100: /fm vol 40' }
+        if (!Number.isInteger(volume) || volume < 0 || volume > 100) {
+          return reply({ kind: 'error', message: 'volume is 0 to 100, as in /fm vol 40' })
+        }
         st = await api($, 'POST', '/v1/volume', { volume })
-      } else if (word === 'keys') {
-        const isOpen = !(await read($, isKeysOpen))
-        await update($, isKeysOpen, () => isOpen)
-        return { text: isOpen ? 'Controls open above the prompt · ctrl+x tab to use them' : 'Controls closed' }
-      } else if (word === 'status') {
-        st = await api($, 'GET', '/v1/status')
+        await setStatus($, st)
+        return reply({ kind: 'volume', st })
       } else {
-        return { text: USAGE }
+        st = await api($, 'GET', '/v1/status')
       }
       await setStatus($, st)
-      return { text: describe(st) }
+      return reply({ kind: 'status', st })
     } catch (err) {
-      if (err instanceof Offline) return { text: await offlineHelp($) }
-      return { text: `cc-fm: ${err instanceof Error ? err.message : String(err)}` }
+      if (err instanceof Offline) return reply({ kind: 'offline', socket: await socketPath($) })
+      return reply({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
     }
   })
 
-  // The controls above the prompt, shown by /fm keys: a railed, one-item-a-
-  // line layout where the band has room, three spaced lines where it has
-  // less, one line where it has little. Hotkeys work once ctrl+x tab
-  // focuses the band, and every button clicks too.
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const st = await read($, status)
-    if (!(await read($, isKeysOpen)) || e.props.hasSurvey || st.state === 'offline') {
-      return next(e)
+  // Every /fm reply draws on the rail, in place of the plain row.
+  on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    // The row's text arrives under the plugin's name: "cc-fm-mod: …".
+    const text = e.props.text.replace(/^cc-fm-mod: /, '')
+    const r = e.props.command === 'fm' && e.surface === 'terminal' ? replies.get(text) : undefined
+    if (!r || e.surface !== 'terminal') return next(e)
+    const ui = $.ui.resolve(e)
+    const { Text } = ui
+    switch (r.kind) {
+      case 'status':
+        return railed(
+          ui,
+          [
+            stateItem(ui, r.st, `vol ${r.st.volume ?? 0}`),
+            ...(r.st.error ? [{ glyph: '✕', color: RED, content: <Text dimColor>{r.st.error}</Text> }] : []),
+          ],
+          <Text dimColor>{[r.st.title, listening(r.st)].filter(Boolean).join('  ·  ') || 'claude.fm'}</Text>,
+        )
+      case 'volume':
+        return railed(
+          ui,
+          [],
+          <Text>
+            <Text>{`volume ${String(r.st.volume ?? 0).padStart(3)}  `}</Text>
+            {meter(ui, r.st.volume ?? 0)}
+          </Text>,
+        )
+      case 'usage':
+        return railed(
+          ui,
+          COMMANDS.slice(0, -1).map(([cmd, what]) => ({
+            glyph: '◇',
+            color: VIOLET_ITEM,
+            content: keyHint(ui, cmd.padEnd(16), what),
+          })),
+          keyHint(ui, COMMANDS[COMMANDS.length - 1]![0].padEnd(16), COMMANDS[COMMANDS.length - 1]![1]),
+        )
+      case 'offline':
+        return railed(
+          ui,
+          [{ glyph: '○', content: <Text dimColor>{`no player answers on ${r.socket}`}</Text> }],
+          keyHint(ui, 'cc-fm serve', 'start one where your speakers are; over SSH, forward the socket'),
+        )
+      case 'error':
+        return railed(ui, [{ glyph: '✕', color: RED, content: <Text>{r.message}</Text> }], keyHint(ui, '/fm help', 'what /fm takes'))
     }
-    const { Box, Button, Text } = $.ui.resolve(e)
+  })
+
+  // The controls pane /fm keys opens. With the keyboard it is lit and says
+  // how to leave; without it, it recedes and says how to take it back, the
+  // only place the chord appears.
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const ui = $.ui.resolve(e)
+    const { Box, Button, Text } = ui
+    const st = await read($, status)
+    const isFocused = e.props.isFocused
     const volume = st.volume ?? 0
     const isPlaying = st.state === 'playing'
-    const isStopped = st.state === 'stopped'
-    const stateLabel =
-      st.state === 'playing' ? 'playing' : st.state === 'stopped' ? 'stopped' : st.state === 'connecting' ? 'connecting…' : 'reconnecting…'
+    const isStopped = st.state === 'stopped' || st.state === 'offline'
 
-    const play = <Button key="play" hotkey="p" plain label="play" dimColor={isPlaying} onPress={() => control($, 'POST', '/v1/play')} />
-    const stop = <Button key="stop" hotkey="s" plain label="stop" dimColor={isStopped} onPress={() => control($, 'POST', '/v1/stop')} />
-    const quieter = (
-      <Button
-        key="down"
-        hotkey="j"
-        plain
-        label="quieter"
-        dimColor={volume === 0}
-        onPress={() => control($, 'POST', '/v1/volume', { volume: Math.max(0, volume - VOLUME_STEP) })}
-      />
-    )
-    const louder = (
-      <Button
-        key="up"
-        hotkey="k"
-        plain
-        label="louder"
-        dimColor={volume === 100}
-        onPress={() => control($, 'POST', '/v1/volume', { volume: Math.min(100, volume + VOLUME_STEP) })}
-      />
-    )
-    const close = <Button key="close" hotkey="x" plain label="close" onPress={() => update($, isKeysOpen, () => false)} />
-    const state = (
-      <Text color={isPlaying ? CORAL : undefined} dimColor={!isPlaying}>
-        ● {stateLabel}
-      </Text>
-    )
-
-    // Not enough room for three spaced lines: one line, same keys.
-    if (e.props.maxRows < SPACIOUS_ROWS) {
-      return (
-        <Box flexDirection="row" gap={2}>
-          <Text bold>♪ claude.fm</Text>
-          {state}
-          {play}
-          {stop}
-          {quieter}
-          <Text>{volume}</Text>
-          {louder}
-          {close}
-        </Box>
-      )
-    }
-
-    const filled = Math.round((volume / 100) * METER_CELLS)
-    const meter = (
-      <Text>
-        <Text color={CORAL}>{'━'.repeat(filled)}</Text>
-        <Text dimColor>{'─'.repeat(METER_CELLS - filled)}</Text>
-      </Text>
-    )
-    const howTo = (
-      <Text>
-        <Text bold>ctrl+x tab</Text>
-        <Text dimColor>  use these keys  ·  </Text>
-        <Text bold>esc</Text>
-        <Text dimColor>  back to the prompt  ·  </Text>
-      </Text>
-    )
-
-    // Room for the full layout: one item a line on a thin left rail, state
-    // carried by the glyph, after the clack-style CLI steppers.
-    if (e.props.maxRows >= RAIL_ROWS) {
-      const rail = <Text dimColor>│</Text>
-      const dot = isPlaying ? (
-        <Text color={CORAL}>●</Text>
-      ) : isStopped ? (
-        <Text dimColor>○</Text>
-      ) : (
-        <Text color={AMBER}>◌</Text>
-      )
-      return (
-        <Box flexDirection="column" paddingX={1}>
-          <Box flexDirection="row" gap={2}>
-            <Text dimColor>┌</Text>
-            <Text bold>♪ claude.fm</Text>
-          </Box>
-          {rail}
-          <Box flexDirection="row" gap={2}>
-            {dot}
-            <Text dimColor={!isPlaying}>{stateLabel}</Text>
-          </Box>
-          {rail}
-          <Box flexDirection="row" gap={2}>
-            <Text color={STEEL}>◇</Text>
-            <Box flexDirection="row" gap={4}>
-              {play}
-              {stop}
-            </Box>
-          </Box>
-          {rail}
-          <Box flexDirection="row" gap={2}>
-            <Text color={STEEL}>◇</Text>
-            <Box flexDirection="row" gap={2}>
-              {quieter}
-              {meter}
-              <Text>{String(volume).padStart(3)}</Text>
-              {louder}
-            </Box>
-          </Box>
-          {rail}
-          <Box flexDirection="row" gap={2}>
-            <Text dimColor>└</Text>
-            <Box flexDirection="row">
-              {howTo}
-              {close}
-            </Box>
-          </Box>
-        </Box>
-      )
-    }
-
-    return (
-      <Box flexDirection="column" paddingX={1}>
-        <Box flexDirection="row" gap={3}>
-          <Text bold>♪ claude.fm</Text>
-          {state}
-        </Box>
-        <Box flexDirection="row" gap={6} marginTop={1}>
-          <Box flexDirection="row" gap={3}>
-            {play}
-            {stop}
-          </Box>
-          <Box flexDirection="row" gap={2}>
-            {quieter}
-            {meter}
-            <Text>{String(volume).padStart(3)}</Text>
-            {louder}
-          </Box>
-        </Box>
-        <Box flexDirection="row" gap={6} marginTop={1}>
-          <Text>
-            <Text bold>ctrl+x tab</Text>
-            <Text dimColor>  use these keys</Text>
-          </Text>
-          <Text>
-            <Text bold>esc</Text>
-            <Text dimColor>  back to the prompt</Text>
-          </Text>
-          {close}
-        </Box>
+    const transport = (
+      <Box flexDirection="row" gap={4}>
+        <Button key="play" hotkey="p" plain label="play" dimColor={!isFocused || isPlaying} onPress={() => control($, 'POST', '/v1/play')} />
+        <Button key="stop" hotkey="s" plain label="stop" dimColor={!isFocused || isStopped} onPress={() => control($, 'POST', '/v1/stop')} />
       </Box>
+    )
+    const level = (
+      <Box flexDirection="row" gap={2}>
+        <Button
+          key="down"
+          hotkey="j"
+          plain
+          label="quieter"
+          dimColor={!isFocused || volume === 0}
+          onPress={() => control($, 'POST', '/v1/volume', { volume: Math.max(0, volume - VOLUME_STEP) })}
+        />
+        {meter(ui, volume, !isFocused)}
+        <Text dimColor={!isFocused}>{String(volume).padStart(3)}</Text>
+        <Button
+          key="up"
+          hotkey="k"
+          plain
+          label="louder"
+          dimColor={!isFocused || volume === 100}
+          onPress={() => control($, 'POST', '/v1/volume', { volume: Math.min(100, volume + VOLUME_STEP) })}
+        />
+      </Box>
+    )
+    const footer = isFocused ? keyHint(ui, 'esc', 'close') : keyHint(ui, 'ctrl+x tab', 'take the controls')
+
+    return railed(
+      ui,
+      [stateItem(ui, st, undefined, !isFocused), { glyph: '◇', color: VIOLET_ITEM, content: transport }, { glyph: '◇', color: VIOLET_ITEM, content: level }],
+      footer,
+      isFocused ? 'active' : 'receded',
     )
   })
 

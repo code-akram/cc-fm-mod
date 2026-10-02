@@ -103,7 +103,8 @@ In Claude Code:
 | `/fm vol 40` or `/fm 40` | set the volume, 0–100 |
 | `/fm status` | what's playing, the volume and how many sessions are listening |
 | `/fm play <source>` | play something else |
-| `/fm keys` | show the controls above the prompt: the player's state, play and stop, a volume meter. `ctrl+x tab` focuses them; then `p` play, `s` stop, `j`/`k` quieter/louder, `x` close, `esc` back to the prompt. Each is clickable too. |
+| `/fm keys` | open the controls, ready for the keyboard: `p` play, `s` stop, `j`/`k` quieter and louder, `esc` to close. While they have the keyboard their rail lights up in coral; click away and they dim (`ctrl+x tab` takes them back). Each control is clickable too. |
+| `/fm help` | what `/fm` takes |
 
 All of them work mid-turn.
 
